@@ -7,10 +7,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <map>
 #include <string>
 
 #include "../core/log.h"
+#include "class_picker.h"
 #include "dark_button.h"
 #include "theme.h"
 #include "workspace_tabs.h"
@@ -26,6 +28,21 @@ constexpr int kHeaderHeight = 36;
 // Raiz unica del arbol Explorer: la dimension/escena del lugar. Tambien
 // es el "Parent" que muestra Properties para cualquier parte.
 constexpr const char* kRootName = "dimension01";
+
+// Grupos sinteticos de nivel superior del Explorer (no son objetos de la
+// escena): agrupan las dimensiones, los scripts del proyecto y la
+// biblioteca de recursos.
+constexpr const char* kDimensionsGroup = "Dimensions";
+constexpr const char* kScriptsGroup = "Scripts";
+constexpr const char* kAssetsGroup = "Assets";
+
+// Carpetas base de la biblioteca de Assets (siempre visibles, aunque
+// esten vacias), en el orden del diseno.
+const char* const kAssetFolders[] = {"Models",   "Meshes",   "Images",
+                                     "Textures", "Audio",    "Animations",
+                                     "ModuleScripts"};
+constexpr int kAssetFolderCount =
+    static_cast<int>(sizeof(kAssetFolders) / sizeof(kAssetFolders[0]));
 
 // Ids dentro del panel Properties (100.. = etiquetas, 200.. = valores,
 // 300.. = resumenes "x, y, z" de cada fila del Transform).
@@ -74,6 +91,12 @@ constexpr int kIdLblPivotRow = 611;   // 611..612: Position / Orientation
 constexpr int kIdLblPivotAxis = 620;  // 620..625: X / Y / Z de cada fila
 constexpr int kIdLblShape = 626;      // etiqueta "Shape" de Appearance
 
+// Attributes y Tags: EDIT multilinea editables por el usuario.
+constexpr int kIdAttributes = 700;
+constexpr int kIdTags = 701;
+constexpr int kIdLblAttributes = 710;
+constexpr int kIdLblTags = 711;
+
 // Indices de las categorias del panel Properties (orden visual y de
 // las cascadas en catOpen_/triCat_).
 constexpr int kCatAppearance = 0;
@@ -81,6 +104,9 @@ constexpr int kCatData = 1;
 constexpr int kCatTransform = 2;
 constexpr int kCatPivot = 3;
 constexpr int kCatCollision = 4;
+constexpr int kCatAttributes = 5;
+constexpr int kCatTags = 6;
+constexpr int kCategoryCount = 7;
 
 // Sombras de fondo de las cajitas del panel Properties (RowBand::shade):
 // base de la cajita, fila alterna mas clara y cabecera de la cajita.
@@ -109,16 +135,36 @@ int bandShadeAt(const std::vector<RowBand>& bands, int x, int y) {
     return -1;
 }
 
-// Cabecera del panel + linea separadora, dentro del WM_PAINT propio.
-void paintPanelHeader(HDC hdc, const RECT& rc, const char* title) {
+// Rectangulo de la pestana "index" de "count" repartidas en el ancho.
+RECT tabRect(const RECT& rc, int index, int count) {
+    RECT r{};
+    r.left = index * rc.right / count;
+    r.right = (index + 1) * rc.right / count;
+    r.top = 0;
+    r.bottom = kHeaderHeight;
+    return r;
+}
+
+// Barra de pestanas del panel: la activa se funde con el fondo del
+// contenido (cuadrado inferior) y las demas quedan atenuadas.
+void paintTabs(HDC hdc, const RECT& rc, const char* const* labels, int count,
+               int active) {
     RECT header{0, 0, rc.right, kHeaderHeight};
     FillRect(hdc, &header, theme::headerBackgroundBrush());
 
-    HFONT oldFont = static_cast<HFONT>(SelectObject(hdc, theme::uiHeaderFont()));
+    HFONT oldFont =
+        static_cast<HFONT>(SelectObject(hdc, theme::uiHeaderFont()));
     SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, theme::text());
-    RECT textRc{12, 0, rc.right, kHeaderHeight};
-    DrawTextA(hdc, title, -1, &textRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    for (int i = 0; i < count; ++i) {
+        RECT tr = tabRect(rc, i, count);
+        if (i == active) {
+            RECT body{tr.left, 5, tr.right, kHeaderHeight};
+            FillRect(hdc, &body, theme::backgroundBrush());
+        }
+        SetTextColor(hdc, i == active ? theme::text() : theme::textDisabled());
+        DrawTextA(hdc, labels[i], -1, &tr,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
     SelectObject(hdc, oldFont);
 
     HPEN pen = CreatePen(PS_SOLID, 1, theme::border());
@@ -130,8 +176,8 @@ void paintPanelHeader(HDC hdc, const RECT& rc, const char* title) {
 }
 
 HTREEITEM addTreeRoot(HWND tree, const char* text) {
-    char label[64]{};
-    lstrcpynA(label, text, 64);
+    char label[128]{};
+    lstrcpynA(label, text, 128);
     TVINSERTSTRUCTA ins{};
     ins.hParent = TVI_ROOT;
     ins.hInsertAfter = TVI_LAST;
@@ -140,11 +186,53 @@ HTREEITEM addTreeRoot(HWND tree, const char* text) {
     return TreeView_InsertItem(tree, &ins);
 }
 
+// Inserta un nodo hijo (bajo parent) con el texto dado. sceneNode = 1
+// para los nodos que son objetos de la escena (llevan el boton "+").
+HTREEITEM addTreeChild(HWND tree, HTREEITEM parent, const std::string& text,
+                       LPARAM sceneNode = 0) {
+    char label[260]{};
+    lstrcpynA(label, text.c_str(), 260);
+    TVINSERTSTRUCTA ins{};
+    ins.hParent = parent;
+    ins.hInsertAfter = TVI_LAST;
+    ins.item.mask = TVIF_TEXT | TVIF_PARAM;
+    ins.item.pszText = label;
+    ins.item.lParam = sceneNode;
+    return TreeView_InsertItem(tree, &ins);
+}
+
+// Inserta en el arbol el contenido de una carpeta de disco (carpetas
+// primero, luego archivos, alfabetico), de forma recursiva. Solo para
+// los grupos sinteticos Scripts y Assets.
+void insertDirRecursive(HWND tree, HTREEITEM parent, const std::string& dir) {
+    std::error_code ec;
+    if (!std::filesystem::is_directory(dir, ec)) return;
+    std::vector<std::string> dirs;
+    std::vector<std::string> files;
+    for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+        const std::string name = entry.path().filename().string();
+        if (entry.is_directory(ec)) {
+            dirs.push_back(name);
+        } else {
+            files.push_back(name);
+        }
+    }
+    std::sort(dirs.begin(), dirs.end());
+    std::sort(files.begin(), files.end());
+    for (const std::string& d : dirs) {
+        HTREEITEM item = addTreeChild(tree, parent, d);
+        insertDirRecursive(tree, item, (std::filesystem::path(dir) / d).string());
+    }
+    for (const std::string& f : files) {
+        addTreeChild(tree, parent, f);
+    }
+}
+
 // Busca un nodo por texto recorriendo el arbol completo (por debajo de
 // item en profundidad). Devuelve nullptr si no existe.
 HTREEITEM findTreeItemRec(HWND tree, HTREEITEM item, const char* name) {
     while (item) {
-        char text[64]{};
+        char text[260]{};
         TVITEMA tvi{};
         tvi.hItem = item;
         tvi.mask = TVIF_TEXT;
@@ -414,8 +502,39 @@ bool PlaceView::create(void* parentHwnd) {
     SetWindowSubclass(tree,
                       reinterpret_cast<SUBCLASSPROC>(&PlaceView::treeSubclassProc),
                       1, reinterpret_cast<DWORD_PTR>(this));
-    // Raiz unica por defecto: la dimension/escena del lugar.
-    root_ = addTreeRoot(tree, kRootName);
+    // Grupos de nivel superior: Dimensions / Scripts. El contenido lo
+    // rellena rebuildTree; los Assets van a su propia pestana.
+    root_ = addTreeRoot(tree, kDimensionsGroup);
+    addTreeRoot(tree, kScriptsGroup);
+
+    // Pestana Assets: arbol propio del explorador de recursos, hermano
+    // del de Explorer (se muestran alternos).
+    HWND assetsTree = CreateWindowExA(
+        0, WC_TREEVIEWA, "",
+        WS_CHILD | TVS_HASLINES | TVS_LINESATROOT | TVS_SHOWSELALWAYS, 6,
+        kHeaderHeight + 6, kExplorerWidth - 12, 100,
+        static_cast<HWND>(explorer_),
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(2)), inst, nullptr);
+    assetsTree_ = assetsTree;
+    SendMessageA(assetsTree, WM_SETFONT,
+                 reinterpret_cast<WPARAM>(theme::uiFont()), TRUE);
+    TreeView_SetBkColor(assetsTree, theme::listBackground());
+    TreeView_SetTextColor(assetsTree, theme::text());
+    TreeView_SetLineColor(assetsTree, theme::border());
+
+    // Pestana Output: EDIT multiline de solo lectura que recibe los
+    // mensajes de SK_INFO/WARN/ERROR.
+    HWND output = CreateWindowExA(
+        0, "EDIT", "",
+        WS_CHILD | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL |
+            ES_LEFT,
+        6, kHeaderHeight + 6, kPropertiesWidth - 12, 100,
+        static_cast<HWND>(properties_),
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(3)), inst, nullptr);
+    output_ = output;
+    SendMessageA(output, WM_SETFONT,
+                 reinterpret_cast<WPARAM>(theme::uiFont()), TRUE);
+    SendMessageA(output, EM_SETLIMITTEXT, 256 * 1024, 0);
 
     // Properties: Nombre (EDIT editable solo con un parte seleccionado)
     // + fila Parent (solo lectura) + Transform (cascada
@@ -538,6 +657,31 @@ bool PlaceView::create(void* parentHwnd) {
         }
     }
 
+    // Attributes: EDIT multilinea "nombre | tipo | valor" por linea.
+    makeStatic(hprop, inst, kIdLblAttributes, "Attributes",
+               34, 0, 200, 22, theme::uiHeaderFont());
+    HWND attrEdit = CreateWindowExA(
+        WS_EX_CLIENTEDGE, "EDIT", "",
+        WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_TABSTOP | ES_MULTILINE |
+            ES_AUTOVSCROLL | ES_LEFT | ES_WANTRETURN,
+        12, 0, kPropertiesWidth - 30, 66, hprop,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdAttributes)), inst,
+        nullptr);
+    SendMessageA(attrEdit, WM_SETFONT, reinterpret_cast<WPARAM>(theme::uiFont()),
+                 TRUE);
+
+    // Tags: una etiqueta por linea.
+    makeStatic(hprop, inst, kIdLblTags, "Tags",
+               34, 0, 200, 22, theme::uiHeaderFont());
+    HWND tagsEdit = CreateWindowExA(
+        WS_EX_CLIENTEDGE, "EDIT", "",
+        WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_TABSTOP | ES_MULTILINE |
+            ES_AUTOVSCROLL | ES_LEFT | ES_WANTRETURN,
+        12, 0, kPropertiesWidth - 30, 54, hprop,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdTags)), inst, nullptr);
+    SendMessageA(tagsEdit, WM_SETFONT, reinterpret_cast<WPARAM>(theme::uiFont()),
+                 TRUE);
+
     layoutProperties();
 
     resize(rc.right, rc.bottom);
@@ -547,6 +691,7 @@ bool PlaceView::create(void* parentHwnd) {
 }
 
 void PlaceView::destroy() {
+    ClassPicker::close();
     if (tree_) {
         RemoveWindowSubclass(static_cast<HWND>(tree_),
                              reinterpret_cast<SUBCLASSPROC>(
@@ -621,11 +766,65 @@ long long __stdcall PlaceView::treeSubclassProc(void* hwndPtr,
                     }
                     item = TreeView_GetNextVisible(hwnd, item);
                 }
+                // Boton "+" de los nodos de escena, alineado al borde
+                // derecho del arbol (una cruz).
+                RECT cli{};
+                GetClientRect(hwnd, &cli);
+                const int plusCx = cli.right - 12;
+                item = TreeView_GetFirstVisible(hwnd);
+                while (item) {
+                    TVITEMA tvi{};
+                    tvi.hItem = item;
+                    tvi.mask = TVIF_PARAM;
+                    TreeView_GetItem(hwnd, &tvi);
+                    if (tvi.lParam == 1) {
+                        RECT r{};
+                        if (TreeView_GetItemRect(hwnd, item, &r, TRUE)) {
+                            const int cy = (r.top + r.bottom) / 2;
+                            const int h = 4;
+                            HPEN pen = CreatePen(PS_SOLID, 1, theme::textDisabled());
+                            HPEN oldPen = static_cast<HPEN>(SelectObject(hdc, pen));
+                            MoveToEx(hdc, plusCx - h, cy, nullptr);
+                            LineTo(hdc, plusCx + h + 1, cy);
+                            MoveToEx(hdc, plusCx, cy - h, nullptr);
+                            LineTo(hdc, plusCx, cy + h + 1);
+                            SelectObject(hdc, oldPen);
+                            DeleteObject(pen);
+                        }
+                    }
+                    item = TreeView_GetNextVisible(hwnd, item);
+                }
             }
             EndPaint(hwnd, &ps);
             return 0;
         }
         case WM_LBUTTONDOWN: {
+            // Click en el boton "+" de un nodo: abre el selector de clase.
+            if (self && self->tree_ == hwnd) {
+                const int x = static_cast<short>(LOWORD(lParam));
+                const int y = static_cast<short>(HIWORD(lParam));
+                RECT cli{};
+                GetClientRect(hwnd, &cli);
+                if (x >= cli.right - 24) {
+                    TVHITTESTINFO hit{};
+                    hit.pt.x = x;
+                    hit.pt.y = y;
+                    HTREEITEM under = TreeView_HitTest(hwnd, &hit);
+                    if (under) {
+                        TVITEMA tvi{};
+                        tvi.hItem = under;
+                        tvi.mask = TVIF_PARAM | TVIF_TEXT;
+                        char text[260]{};
+                        tvi.pszText = text;
+                        tvi.cchTextMax = static_cast<int>(sizeof(text));
+                        TreeView_GetItem(hwnd, &tvi);
+                        if (tvi.lParam == 1) {
+                            self->openClassPicker(hwnd, text);
+                            return 0;
+                        }
+                    }
+                }
+            }
             // Click en un triangulito de cascada: plegar/desplegar el
             // nodo sin cambiar la seleccion.
             if (self && self->tree_ == hwnd) {
@@ -747,72 +946,57 @@ void PlaceView::addObject(const std::string& name) {
 
 void PlaceView::addObject(const std::string& name,
                           const std::string& parent) {
-    if (!tree_ || !root_) return;
+    if (!tree_) return;
     HWND tree = static_cast<HWND>(tree_);
 
-    HTREEITEM hParent = static_cast<HTREEITEM>(root_);
-    if (!parent.empty()) {
-        HTREEITEM found = findTreeItem(tree, parent.c_str());
-        if (found) hParent = found;
-    }
+    HTREEITEM hParent = nullptr;
+    if (!parent.empty()) hParent = findTreeItem(tree, parent.c_str());
+    if (!hParent) hParent = findTreeItem(tree, kWorkspaceName);
+    if (!hParent) hParent = findTreeItem(tree, kDimensionName);
+    if (!hParent) hParent = static_cast<HTREEITEM>(root_);
 
-    char label[64]{};
-    lstrcpynA(label, name.c_str(), 64);
-    TVINSERTSTRUCTA ins{};
-    ins.hParent = hParent;
-    ins.hInsertAfter = TVI_LAST;
-    ins.item.mask = TVIF_TEXT;
-    ins.item.pszText = label;
-    HTREEITEM item = TreeView_InsertItem(tree, &ins);
-
-    TreeView_Expand(tree, static_cast<HTREEITEM>(root_), TVE_EXPAND);
-    if (hParent != static_cast<HTREEITEM>(root_)) {
-        TreeView_Expand(tree, hParent, TVE_EXPAND);
-    }
+    HTREEITEM item = addTreeChild(tree, hParent, name);
+    if (hParent) TreeView_Expand(tree, hParent, TVE_EXPAND);
     if (item) TreeView_Select(tree, item, TVGN_CARET);
 }
 
 void PlaceView::rebuildTree(const std::vector<SceneObject>& objects) {
-    clearObjects();
-    if (!tree_ || !root_) return;
+    if (!tree_) return;
     HWND tree = static_cast<HWND>(tree_);
+    clearObjects();
 
-    // Inserta nodo y lo apunta por nombre para que los hijos puedan
-    // colgar de el (el archivo no garantiza que el padre preceda).
-    auto insertNode = [&](HTREEITEM parent, const std::string& name,
-                          std::map<std::string, HTREEITEM>& items,
-                          HTREEITEM& last) {
-        char label[64]{};
-        lstrcpynA(label, name.c_str(), 64);
-        TVINSERTSTRUCTA ins{};
-        ins.hParent = parent;
-        ins.hInsertAfter = TVI_LAST;
-        ins.item.mask = TVIF_TEXT;
-        ins.item.pszText = label;
-        HTREEITEM item = TreeView_InsertItem(tree, &ins);
-        items[name] = item;
-        last = item;
-    };
+    // Grupos de nivel superior (Explorer): Dimensions y Scripts.
+    root_ = addTreeRoot(tree, kDimensionsGroup);
+    HTREEITEM scriptsGroup = addTreeRoot(tree, kScriptsGroup);
+    const HTREEITEM dimGroup = static_cast<HTREEITEM>(root_);
 
     std::map<std::string, HTREEITEM> items;
     std::vector<const SceneObject*> pending;
     HTREEITEM last = nullptr;
+    auto insertNode = [&](HTREEITEM parent, const std::string& name) {
+        // lParam = 1: es un objeto de escena (lleva boton "+").
+        HTREEITEM item = addTreeChild(tree, parent, name, 1);
+        items[name] = item;
+        last = item;
+    };
+
+    // Dimensiones y demas objetos con parent vacio cuelgan del grupo
+    // Dimensions; el resto, de su padre (varias pasadas por si el del
+    // archivo no precede al hijo).
     for (const SceneObject& object : objects) {
         if (object.parent.empty()) {
-            insertNode(static_cast<HTREEITEM>(root_), object.name, items, last);
+            insertNode(dimGroup, object.name);
         } else {
             pending.push_back(&object);
         }
     }
-    // Pasadas sobre el resto: un hijo se inserta solo cuando su padre
-    // ya esta en el arbol.
     for (size_t guard = 0; guard < pending.size() && !pending.empty();
          ++guard) {
         bool progressed = false;
         for (auto it = pending.begin(); it != pending.end();) {
             auto parent = items.find((*it)->parent);
             if (parent != items.end()) {
-                insertNode(parent->second, (*it)->name, items, last);
+                insertNode(parent->second, (*it)->name);
                 it = pending.erase(it);
                 progressed = true;
             } else {
@@ -821,74 +1005,94 @@ void PlaceView::rebuildTree(const std::vector<SceneObject>& objects) {
         }
         if (!progressed) break;
     }
-    // Padres huerfanos (el padre no existe): cuelgan de la raiz.
     for (const SceneObject* object : pending) {
-        insertNode(static_cast<HTREEITEM>(root_), object->name, items, last);
+        insertNode(dimGroup, object->name);
     }
 
-    // Expande todos los niveles para que la jerarquia se vea entera.
-    expandAll(tree, static_cast<HTREEITEM>(root_));
+    // Scripts globales del proyecto (Server/Shared/Player/Character).
+    {
+        static const char* kScriptRoots[] = {"Server", "Shared", "Player",
+                                             "Character"};
+        for (const char* root : kScriptRoots) {
+            HTREEITEM item = addTreeChild(tree, scriptsGroup, root);
+            if (!scriptsRoot_.empty()) {
+                const std::filesystem::path dir =
+                    std::filesystem::path(scriptsRoot_) / root;
+                insertDirRecursive(tree, item, dir.string());
+            }
+        }
+    }
+
+    expandAll(tree, dimGroup);
+    TreeView_Expand(tree, scriptsGroup, TVE_EXPAND);
     if (last) TreeView_Select(tree, last, TVGN_CARET);
+
+    // Pestana Assets: biblioteca de recursos (carpetas base siempre
+    // presentes) en su propio arbol.
+    if (assetsTree_) {
+        HWND at = static_cast<HWND>(assetsTree_);
+        TreeView_DeleteAllItems(at);
+        for (int i = 0; i < kAssetFolderCount; ++i) {
+            HTREEITEM item = addTreeRoot(at, kAssetFolders[i]);
+            TreeView_Expand(at, item, TVE_EXPAND);
+            if (!assetsRoot_.empty()) {
+                const std::filesystem::path dir =
+                    std::filesystem::path(assetsRoot_) / kAssetFolders[i];
+                insertDirRecursive(at, item, dir.string());
+                TreeView_Expand(at, item, TVE_EXPAND);
+            }
+        }
+    }
 }
 
 void PlaceView::clearObjects() {
-    if (!tree_ || !root_) return;
+    if (!tree_) return;
     HWND tree = static_cast<HWND>(tree_);
-
-    HTREEITEM child = TreeView_GetChild(tree, static_cast<HTREEITEM>(root_));
-    while (child) {
-        HTREEITEM next = TreeView_GetNextSibling(tree, child);
-        TreeView_DeleteItem(tree, child);
-        child = next;
+    HTREEITEM item = TreeView_GetRoot(tree);
+    while (item) {
+        HTREEITEM next = TreeView_GetNextSibling(tree, item);
+        TreeView_DeleteItem(tree, item);
+        item = next;
     }
-    TreeView_Select(tree, static_cast<HTREEITEM>(root_), TVGN_CARET);
+    root_ = nullptr;
 }
 
 void PlaceView::renameTreeItem(const std::string& oldName,
                                const std::string& newName) {
-    if (!tree_ || !root_) return;
+    if (!tree_) return;
     HWND tree = static_cast<HWND>(tree_);
-    HTREEITEM child = TreeView_GetChild(tree, static_cast<HTREEITEM>(root_));
-    while (child) {
-        char text[64]{};
-        TVITEMA tvi{};
-        tvi.hItem = child;
-        tvi.mask = TVIF_TEXT;
-        tvi.pszText = text;
-        tvi.cchTextMax = static_cast<int>(sizeof(text));
-        TreeView_GetItem(tree, &tvi);
-        if (oldName == text) {
-            char label[64]{};
-            lstrcpynA(label, newName.c_str(), 64);
-            TVITEMA set{};
-            set.hItem = child;
-            set.mask = TVIF_TEXT;
-            set.pszText = label;
-            TreeView_SetItem(tree, &set);
-            return;
-        }
-        child = TreeView_GetNextSibling(tree, child);
-    }
+    HTREEITEM item = findTreeItem(tree, oldName.c_str());
+    if (!item) return;
+    char label[260]{};
+    lstrcpynA(label, newName.c_str(), 260);
+    TVITEMA set{};
+    set.hItem = item;
+    set.mask = TVIF_TEXT;
+    set.pszText = label;
+    TreeView_SetItem(tree, &set);
 }
 
 void PlaceView::removeTreeItem(const std::string& name) {
-    if (!tree_ || !root_) return;
+    if (!tree_) return;
     HWND tree = static_cast<HWND>(tree_);
-    HTREEITEM child = TreeView_GetChild(tree, static_cast<HTREEITEM>(root_));
-    while (child) {
-        char text[64]{};
-        TVITEMA tvi{};
-        tvi.hItem = child;
-        tvi.mask = TVIF_TEXT;
-        tvi.pszText = text;
-        tvi.cchTextMax = static_cast<int>(sizeof(text));
-        TreeView_GetItem(tree, &tvi);
-        HTREEITEM next = TreeView_GetNextSibling(tree, child);
-        if (name == text) {
-            TreeView_DeleteItem(tree, child);
-            return;
+    HTREEITEM item = findTreeItem(tree, name.c_str());
+    if (item) TreeView_DeleteItem(tree, item);
+}
+
+// Rellena los EDIT de Attributes (700) y Tags (701) con el contenido del
+// objeto (una linea por atributo "nombre | tipo | valor" y por etiqueta).
+void fillAttributesAndTags(HWND props, const SceneObject& object) {
+    if (HWND attr = GetDlgItem(props, kIdAttributes)) {
+        std::string s;
+        for (const Attribute& a : object.attributes) {
+            s += a.name + " | " + a.type + " | " + a.value + "\r\n";
         }
-        child = next;
+        SetWindowTextA(attr, s.c_str());
+    }
+    if (HWND tags = GetDlgItem(props, kIdTags)) {
+        std::string s;
+        for (const std::string& t : object.tags) s += t + "\r\n";
+        SetWindowTextA(tags, s.c_str());
     }
 }
 
@@ -918,6 +1122,8 @@ void resetPartFields(PlaceView* self, HWND props, const char* text,
     for (int id = kIdCastShadow; id <= kIdAnchored; ++id) {
         if (self) self->setCheck(id, false);
     }
+    if (HWND attr = GetDlgItem(props, kIdAttributes)) SetWindowTextA(attr, "");
+    if (HWND tags = GetDlgItem(props, kIdTags)) SetWindowTextA(tags, "");
 }
 
 void PlaceView::setCheck(int id, bool on) {
@@ -937,7 +1143,9 @@ void PlaceView::showObject(const SceneObject& object, bool relayout) {
     selectedName_ = object.name;
     if (HWND status = GetDlgItem(props, kIdStatus)) {
         setWindowTextIfDifferent(status, object.name.c_str());
-        EnableWindow(status, TRUE); // hay objeto: el nombre es editable
+        // Los nodos estructurales (Workspace, Camera, Lighting, Scripts)
+        // no se renombran: el campo queda de solo lectura.
+        EnableWindow(status, object.protectedNode ? FALSE : TRUE);
     }
     for (int axis = 0; axis < 3; ++axis) {
         setTransformField(props, 200 + axis, (&object.position.x)[axis],
@@ -956,7 +1164,7 @@ void PlaceView::showObject(const SceneObject& object, bool relayout) {
     }
 
     if (HWND className = GetDlgItem(props, kIdClassName)) {
-        setWindowTextIfDifferent(className, "Part");
+        setWindowTextIfDifferent(className, object.className.c_str());
     }
     if (HWND shape = GetDlgItem(props, kIdShape)) {
         setWindowTextIfDifferent(shape, shapeName(object.shape));
@@ -990,6 +1198,7 @@ void PlaceView::showObject(const SceneObject& object, bool relayout) {
                           &pivotText_[3 + axis]);
     }
     updateSummaries(); // resumenes del Pivot ya con los ejes al dia
+    fillAttributesAndTags(props, object);
     // Recoloca y muestra los controles: tras showNoSelection quedaron
     // todos ocultos (showCategories_ = false) y hay que volver a mostrarlos.
     // Mientras se arrastra un objeto el dueno pasa relayout=false y solo
@@ -1003,8 +1212,8 @@ void PlaceView::showRoot() {
     showCategories_ = true;
     selectedName_.clear();
     if (HWND status = GetDlgItem(props, kIdStatus)) {
-        SetWindowTextA(status, kRootName);
-        EnableWindow(status, FALSE); // la raiz no se renombra aqui
+        SetWindowTextA(status, "Sin objeto seleccionado");
+        EnableWindow(status, FALSE); // el grupo no se renombra aqui
     }
     setTransformIdentity(props, fieldText_);
     updateSummaries();
@@ -1323,12 +1532,43 @@ void PlaceView::layoutProperties() {
     }
     endCat();
 
-    // Sin parte seleccionada no se muestra ninguna categoria ni cascada.
-    if (!showCategories_) {
+    // Attributes: EDIT multilinea dentro de su cajita.
+    beginCat(kCatAttributes, kIdLblAttributes);
+    {
+        const bool show = catOpen_[kCatAttributes];
+        const int editH = 66;
+        if (show) {
+            band(y, editH + 8, kShadeBox);
+            place(kIdAttributes, 12, y + 2, boxW - 12, editH, true);
+            y += editH + 8;
+        } else {
+            place(kIdAttributes, 0, 0, boxW - 12, editH, false);
+        }
+    }
+    endCat();
+
+    // Tags: EDIT multilinea dentro de su cajita.
+    beginCat(kCatTags, kIdLblTags);
+    {
+        const bool show = catOpen_[kCatTags];
+        const int editH = 54;
+        if (show) {
+            band(y, editH + 8, kShadeBox);
+            place(kIdTags, 12, y + 2, boxW - 12, editH, true);
+            y += editH + 8;
+        } else {
+            place(kIdTags, 0, 0, boxW - 12, editH, false);
+        }
+    }
+    endCat();
+
+    // Sin parte seleccionada (o con la pestana Output activa) no se
+    // muestra ninguna categoria ni cascada.
+    if (!showCategories_ || leftTab_ != 0) {
         for (Pending& p : pend) p.show = false;
         bands_.clear();
         boxes_.clear();
-        for (int i = 0; i < 5; ++i)
+        for (int i = 0; i < kCategoryCount; ++i)
             for (int k = 0; k < 4; ++k) triCat_[i][k] = 0;
         for (int i = 0; i < 3; ++i)
             for (int k = 0; k < 4; ++k) triRow_[i][k] = 0;
@@ -1355,6 +1595,17 @@ void PlaceView::layoutProperties() {
         SetWindowPos(ctl, nullptr, p.x, p.y - scrollY_, p.w, p.h,
                      SWP_NOZORDER | SWP_NOACTIVATE);
         ShowWindow(ctl, p.show ? SW_SHOW : SW_HIDE);
+    }
+
+    // Pestana Output: el EDIT ocupa todo el contenido debajo de la barra.
+    if (output_) {
+        RECT full{};
+        GetClientRect(props, &full);
+        MoveWindow(static_cast<HWND>(output_), 6, kHeaderHeight + 6,
+                   full.right - 12, full.bottom - kHeaderHeight - 12, TRUE);
+        ShowWindow(static_cast<HWND>(output_),
+                   leftTab_ == 1 ? SW_SHOW : SW_HIDE);
+        ShowScrollBar(props, SB_VERT, leftTab_ == 0 && maxScroll > 0);
     }
 
     // Repinta el panel y TODOS los hijos para que al mover/ocultar
@@ -1386,10 +1637,60 @@ void PlaceView::layoutPanels(int width, int height) {
     if (tree_) {
         MoveWindow(static_cast<HWND>(tree_), 6, kHeaderHeight + 6,
                    kExplorerWidth - 12, panelH - kHeaderHeight - 12, TRUE);
+        ShowWindow(static_cast<HWND>(tree_),
+                   rightTab_ == 0 ? SW_SHOW : SW_HIDE);
+    }
+    if (assetsTree_) {
+        MoveWindow(static_cast<HWND>(assetsTree_), 6, kHeaderHeight + 6,
+                   kExplorerWidth - 12, panelH - kHeaderHeight - 12, TRUE);
+        ShowWindow(static_cast<HWND>(assetsTree_),
+                   rightTab_ == 1 ? SW_SHOW : SW_HIDE);
     }
 
     // El alto del panel cambio: se reenmarca el scroll y se recoloca.
     layoutProperties();
+}
+
+void PlaceView::switchLeftTab(int tab) {
+    leftTab_ = (tab == 1) ? 1 : 0;
+    layoutProperties();
+    InvalidateRect(static_cast<HWND>(properties_), nullptr, TRUE);
+}
+
+void PlaceView::switchRightTab(int tab) {
+    rightTab_ = (tab == 1) ? 1 : 0;
+    if (tree_) {
+        ShowWindow(static_cast<HWND>(tree_), rightTab_ == 0 ? SW_SHOW : SW_HIDE);
+    }
+    if (assetsTree_) {
+        ShowWindow(static_cast<HWND>(assetsTree_),
+                   rightTab_ == 1 ? SW_SHOW : SW_HIDE);
+    }
+    InvalidateRect(static_cast<HWND>(explorer_), nullptr, TRUE);
+}
+
+void PlaceView::openClassPicker(void* treeHwnd, const std::string& parentName) {
+    HWND owner = GetAncestor(static_cast<HWND>(treeHwnd), GA_ROOT);
+    POINT pt{};
+    GetCursorPos(&pt);
+    const std::string parent = parentName;
+    ClassPicker::open(owner, pt.x, pt.y,
+                      [this, parent](const std::string& className) {
+                          if (onInsertClass_) onInsertClass_(parent, className);
+                      });
+}
+
+void PlaceView::appendOutput(int level, const std::string& message) {
+    if (!output_) return;
+    HWND e = static_cast<HWND>(output_);
+    const char* tag = level == 1 ? "[WARN ] " : (level == 2 ? "[ERROR] "
+                                                             : "[INFO ] ");
+    std::string line = tag + message + "\r\n";
+    const int len = GetWindowTextLengthA(e);
+    SendMessageA(e, EM_SETSEL, len, len);
+    SendMessageA(e, EM_REPLACESEL, FALSE,
+                 reinterpret_cast<LPARAM>(line.c_str()));
+    SendMessageA(e, EM_SCROLLCARET, 0, 0);
 }
 
 long long __stdcall PlaceView::wndProc(void* hwndPtr, unsigned int msg,
@@ -1432,9 +1733,16 @@ long long __stdcall PlaceView::wndProc(void* hwndPtr, unsigned int msg,
                 DeleteObject(frame);
             }
 
-            char title[64]{};
-            GetWindowTextA(hwnd, title, static_cast<int>(sizeof(title)));
-            paintPanelHeader(hdc, rc, title);
+            // Barra de pestanas: izquierda (Properties|Output) o derecha
+            // (Explorer|Assets) segun el panel.
+            if (self && hwnd == static_cast<HWND>(self->properties_)) {
+                static const char* kLeftTabs[2] = {"Properties", "Output"};
+                paintTabs(hdc, rc, kLeftTabs, 2, self->leftTab_);
+            } else if (self &&
+                       hwnd == static_cast<HWND>(self->explorer_)) {
+                static const char* kRightTabs[2] = {"Explorer", "Assets"};
+                paintTabs(hdc, rc, kRightTabs, 2, self->rightTab_);
+            }
 
             // Triangulitos de las cascadas (solo en Properties; las
             // zonas huerfanas van a cero). Dibuja las 5 categorias y,
@@ -1444,7 +1752,7 @@ long long __stdcall PlaceView::wndProc(void* hwndPtr, unsigned int msg,
                 HFONT oldFont =
                     static_cast<HFONT>(SelectObject(hdc, theme::uiFont()));
                 SetBkMode(hdc, TRANSPARENT);
-                for (int i = 0; i < 5; ++i) {
+                for (int i = 0; i < kCategoryCount; ++i) {
                     int tri[4] = {
                         self->triCat_[i][0],
                         self->triCat_[i][1] - self->scrollY_,
@@ -1479,13 +1787,44 @@ long long __stdcall PlaceView::wndProc(void* hwndPtr, unsigned int msg,
             return 0;
         }
         case WM_LBUTTONDOWN: {
+            // Click en la barra de pestanas del panel.
+            if (self && hwnd == static_cast<HWND>(self->properties_)) {
+                const int x = static_cast<short>(LOWORD(lParam));
+                const int y = static_cast<short>(HIWORD(lParam));
+                if (y < kHeaderHeight) {
+                    RECT rc{};
+                    GetClientRect(hwnd, &rc);
+                    for (int i = 0; i < 2; ++i) {
+                        RECT tr = tabRect(rc, i, 2);
+                        if (x >= tr.left && x < tr.right) {
+                            if (self->leftTab_ != i) self->switchLeftTab(i);
+                            return 0;
+                        }
+                    }
+                }
+            }
+            if (self && hwnd == static_cast<HWND>(self->explorer_)) {
+                const int x = static_cast<short>(LOWORD(lParam));
+                const int y = static_cast<short>(HIWORD(lParam));
+                if (y < kHeaderHeight) {
+                    RECT rc{};
+                    GetClientRect(hwnd, &rc);
+                    for (int i = 0; i < 2; ++i) {
+                        RECT tr = tabRect(rc, i, 2);
+                        if (x >= tr.left && x < tr.right) {
+                            if (self->rightTab_ != i) self->switchRightTab(i);
+                            return 0;
+                        }
+                    }
+                }
+            }
             // Click en un triangulito: alterna la cascada y recoloca.
             if (self && hwnd == static_cast<HWND>(self->properties_)) {
                 const int x = static_cast<short>(LOWORD(lParam));
                 const int y = static_cast<short>(HIWORD(lParam));
                 // Los triangulos estan en coordenadas de contenido.
                 const int cy = y + self->scrollY_;
-                for (int i = 0; i < 5; ++i) {
+                for (int i = 0; i < kCategoryCount; ++i) {
                     if (inTri(self->triCat_[i], x, cy)) {
                         self->catOpen_[i] = !self->catOpen_[i];
                         self->layoutProperties();
@@ -1725,6 +2064,36 @@ long long __stdcall PlaceView::wndProc(void* hwndPtr, unsigned int msg,
                         field,
                         self->floatText_[id - kIdReflectance].c_str());
                 }
+                return 0;
+            }
+            // Seccion Attributes (700): parsea el texto y lo aplica.
+            if (id == kIdAttributes && code == EN_KILLFOCUS &&
+                !self->selectedName_.empty() && self->onAttributesEdited_) {
+                HWND field =
+                    GetDlgItem(static_cast<HWND>(self->properties_), id);
+                std::string text;
+                if (field) {
+                    const int len = GetWindowTextLengthA(field);
+                    text.resize(len + 1);
+                    GetWindowTextA(field, text.data(), len + 1);
+                    text.resize(std::strlen(text.c_str()));
+                }
+                self->onAttributesEdited_(self->selectedName_, text);
+                return 0;
+            }
+            // Seccion Tags (701).
+            if (id == kIdTags && code == EN_KILLFOCUS &&
+                !self->selectedName_.empty() && self->onTagsEdited_) {
+                HWND field =
+                    GetDlgItem(static_cast<HWND>(self->properties_), id);
+                std::string text;
+                if (field) {
+                    const int len = GetWindowTextLengthA(field);
+                    text.resize(len + 1);
+                    GetWindowTextA(field, text.data(), len + 1);
+                    text.resize(std::strlen(text.c_str()));
+                }
+                self->onTagsEdited_(self->selectedName_, text);
                 return 0;
             }
             // Campos Pivot (500..505): Position/Orientation del origen.

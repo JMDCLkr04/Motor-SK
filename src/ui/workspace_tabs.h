@@ -90,6 +90,13 @@ public:
         onFileCommand_ = std::move(cb);
     }
 
+    // Botones de ejecucion de la fila de menus (a la derecha): Play
+    // simula la escena en una ventana aparte, Run ademas ejecuta los
+    // scripts y Stop la cierra.
+    void setOnPlay(std::function<void()> cb) { onPlay_ = std::move(cb); }
+    void setOnRun(std::function<void()> cb) { onRun_ = std::move(cb); }
+    void setOnStop(std::function<void()> cb) { onStop_ = std::move(cb); }
+
     // width/height son los de la ventana principal; la barra solo usa
     // kTopBandHeight de alto.
     void resize(int width, int height);
@@ -139,6 +146,15 @@ private:
     static constexpr int kFileCount = 9;
     static constexpr int kIdFileBase = 300;
 
+    // Botones de ejecucion (fila de menus, alineados a la derecha).
+    static constexpr int kIdPlay = 160;
+    static constexpr int kIdRun = 161;
+    static constexpr int kIdStop = 162;
+    static constexpr int kActionW = 64;
+    static constexpr int kActionH = kMenuBarHeight - 6;
+    static constexpr int kActionGap = 6;
+    static constexpr int kActionRightMargin = 10;
+
     void* parent_ = nullptr;
     void* hwnd_ = nullptr;
     void* buttons_[kTabCount] = {};
@@ -154,6 +170,9 @@ private:
     void* fileMenu_ = nullptr;         // desplegable del menu Archivo
     void* fileButtons_[kFileCount] = {};
     void* docsBtn_ = nullptr;          // boton "libro" de la navbar
+    void* playButton_ = nullptr;       // botones de ejecucion de la fila de menus
+    void* runButton_ = nullptr;
+    void* stopButton_ = nullptr;
     int active_ = 0;
     int tool_ = 0;
     int partShape_ = 0;
@@ -168,5 +187,8 @@ private:
     std::function<void(int)> onToolChanged_;
     std::function<void(int)> onFileCommand_;
     std::function<void()> onDocs_;
+    std::function<void()> onPlay_;
+    std::function<void()> onRun_;
+    std::function<void()> onStop_;
 };
 } // namespace sk

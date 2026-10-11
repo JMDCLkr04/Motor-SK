@@ -32,6 +32,7 @@ add_executable(${PROJECT_NAME}
     src/project/project.cpp
     src/project/scripts.cpp
     src/scene/scene.cpp
+    src/scene/class_catalog.cpp
     src/scene/picking.cpp
     src/scene/gizmo.cpp
     src/scene/snapping.cpp
@@ -43,6 +44,8 @@ add_executable(${PROJECT_NAME}
     src/ui/prompt.cpp
     src/ui/script_picker.cpp
     src/ui/place_view.cpp
+    src/ui/class_picker.cpp
+    src/ui/play_window.cpp
     src/ui/workspace_tabs.cpp
     src/ui/docs_view.cpp
 )

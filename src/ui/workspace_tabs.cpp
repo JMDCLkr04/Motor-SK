@@ -592,6 +592,30 @@ bool WorkspaceTabs::create(void* parentHwnd) {
                  reinterpret_cast<WPARAM>(theme::uiFont()), TRUE);
     ui::makeDarkButton(static_cast<HWND>(fileButton_));
 
+    // Botones de ejecucion de la fila de menus (alineados a la derecha en
+    // resize): Play, Run y Stop.
+    struct ActionDef {
+        const char* label;
+        int id;
+        void** handle;
+    };
+    const ActionDef actions[3] = {
+        {"Play", kIdPlay, &playButton_},
+        {"Run", kIdRun, &runButton_},
+        {"Stop", kIdStop, &stopButton_},
+    };
+    for (const ActionDef& a : actions) {
+        HWND button = CreateWindowExA(
+            0, "BUTTON", a.label,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, 0, kFileY,
+            kActionW, kActionH, static_cast<HWND>(hwnd_),
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(a.id)), inst, nullptr);
+        *a.handle = button;
+        SendMessageA(button, WM_SETFONT,
+                     reinterpret_cast<WPARAM>(theme::uiFont()), TRUE);
+        ui::makeDarkButton(button);
+    }
+
     // Fila de atajos (arriba): herramientas del viewport + "Part".
     for (int i = 0; i < kToolCount; ++i) {
         const ToolButton& def = kToolButtons[i];
@@ -795,6 +819,9 @@ void WorkspaceTabs::destroy() {
         fileMenu_ = nullptr;
         for (int i = 0; i < kFileCount; ++i) fileButtons_[i] = nullptr;
         docsBtn_ = nullptr;
+        playButton_ = nullptr;
+        runButton_ = nullptr;
+        stopButton_ = nullptr;
     }
 }
 
@@ -846,6 +873,25 @@ void WorkspaceTabs::resize(int width, int height) {
     if (fileButton_) {
         MoveWindow(static_cast<HWND>(fileButton_), kFileX, kFileY, kFileW,
                    kFileH, TRUE);
+    }
+
+    // Botones de ejecucion alineados a la derecha de la fila de menus.
+    {
+        const int stopX = width - kActionRightMargin - kActionW;
+        const int runX = stopX - kActionGap - kActionW;
+        const int playX = runX - kActionGap - kActionW;
+        if (playButton_) {
+            MoveWindow(static_cast<HWND>(playButton_), playX, kFileY, kActionW,
+                       kActionH, TRUE);
+        }
+        if (runButton_) {
+            MoveWindow(static_cast<HWND>(runButton_), runX, kFileY, kActionW,
+                       kActionH, TRUE);
+        }
+        if (stopButton_) {
+            MoveWindow(static_cast<HWND>(stopButton_), stopX, kFileY, kActionW,
+                       kActionH, TRUE);
+        }
     }
 
     for (int i = 0; i < kToolCount; ++i) {
@@ -937,6 +983,11 @@ long long __stdcall WorkspaceTabs::wndProc(void* hwndPtr, unsigned int msg,
                     paintFileButton(*dis, self->fileMenuOpen_);
                     return TRUE;
                 }
+                if (dis->CtlID == kIdPlay || dis->CtlID == kIdRun ||
+                    dis->CtlID == kIdStop) {
+                    ui::paintDarkButton(*dis, true);
+                    return TRUE;
+                }
                 if (dis->CtlID == kIdDocsButton) {
                     paintDocsButton(*dis, self->docsActive_);
                     return TRUE;
@@ -982,6 +1033,18 @@ long long __stdcall WorkspaceTabs::wndProc(void* hwndPtr, unsigned int msg,
                 }
                 if (HIWORD(wParam) == BN_CLICKED && id == kIdDocsButton) {
                     if (self->onDocs_) self->onDocs_();
+                    return 0;
+                }
+                if (HIWORD(wParam) == BN_CLICKED && id == kIdPlay) {
+                    if (self->onPlay_) self->onPlay_();
+                    return 0;
+                }
+                if (HIWORD(wParam) == BN_CLICKED && id == kIdRun) {
+                    if (self->onRun_) self->onRun_();
+                    return 0;
+                }
+                if (HIWORD(wParam) == BN_CLICKED && id == kIdStop) {
+                    if (self->onStop_) self->onStop_();
                     return 0;
                 }
                 if (HIWORD(wParam) == BN_CLICKED && id >= 1 && id <= kTabCount) {

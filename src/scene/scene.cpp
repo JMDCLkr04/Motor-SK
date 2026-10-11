@@ -13,21 +13,133 @@ Mat4 SceneObject::modelMatrix() const {
            rotateZ(rotation.z) * sk::scale(scale);
 }
 
+bool isRenderableClass(const std::string& className) {
+    return className == "Part" || className == "MeshPart" ||
+           className == "SpawnLocation" || className == "Seat";
+}
+
 SceneObject& Scene::addPart(Shape shape) {
     SceneObject obj;
-    // El nombre se deduce de cuantos objetos hay; si ese nombre ya
-    // existe (escena cargada de archivo), se busca el siguiente libre.
-    size_t index = objects_.size();
-    obj.name = index == 0 ? "Part" : "Part" + std::to_string(index);
-    while (findByName(obj.name)) {
-        ++index;
-        obj.name = "Part" + std::to_string(index);
-    }
+    obj.className = "Part";
+    obj.parent = kWorkspaceName;
     obj.shape = shape;
-    obj.position = {static_cast<float>(index % 4) * 1.6f - 2.4f, 0.5f,
-                    static_cast<float>(index / 4) * 1.6f};
+
+    size_t n = 0;
+    for (const SceneObject& o : objects_) {
+        if (isRenderableClass(o.className)) ++n;
+    }
+    obj.name = "Part";
+    if (findByName(obj.name)) {
+        size_t i = 1;
+        while (findByName("Part" + std::to_string(i))) ++i;
+        obj.name = "Part" + std::to_string(i);
+    }
+    obj.position = {static_cast<float>(n % 4) * 1.6f - 2.4f, 0.5f,
+                    static_cast<float>(n / 4) * 1.6f};
     objects_.push_back(std::move(obj));
     return objects_.back();
+}
+
+SceneObject& Scene::addNode(const std::string& className,
+                            const std::string& parent) {
+    SceneObject obj;
+    obj.className = className.empty() ? "Part" : className;
+    obj.parent = parent;
+    if (obj.parent.empty()) {
+        for (const SceneObject& o : objects_) {
+            if (o.className == "Dimension") {
+                obj.parent = o.name;
+                break;
+            }
+        }
+    }
+    const std::string base = obj.className;
+    obj.name = base;
+    if (findByName(obj.name)) {
+        size_t i = 1;
+        while (findByName(base + std::to_string(i))) ++i;
+        obj.name = base + std::to_string(i);
+    }
+    if (isRenderableClass(obj.className)) obj.position = {0.0f, 0.5f, 0.0f};
+    objects_.push_back(std::move(obj));
+    return objects_.back();
+}
+
+void Scene::ensureStructure() {
+    SceneObject* dim = nullptr;
+    for (SceneObject& o : objects_) {
+        if (o.className == "Dimension") {
+            dim = &o;
+            break;
+        }
+    }
+    if (!dim) {
+        SceneObject d;
+        d.name = kDimensionName;
+        d.className = "Dimension";
+        d.parent = "";
+        objects_.push_back(std::move(d));
+        dim = &objects_.back();
+    }
+    const std::string dimName = dim->name;
+
+    auto ensureChild = [&](const char* nm, const char* cls) -> SceneObject* {
+        for (SceneObject& o : objects_) {
+            if (o.name == nm) return &o;
+        }
+        SceneObject c;
+        c.name = nm;
+        c.className = cls;
+        c.parent = dimName;
+        c.protectedNode = true;
+        objects_.push_back(std::move(c));
+        return &objects_.back();
+    };
+
+    ensureChild(kWorkspaceName, "Workspace");
+    ensureChild(kCameraName, "Camera");
+
+    bool lightingNew = false;
+    {
+        bool found = false;
+        for (const SceneObject& o : objects_) {
+            if (o.name == kLightingName) {
+                found = true;
+                break;
+            }
+        }
+        ensureChild(kLightingName, "Lighting");
+        lightingNew = !found;
+    }
+
+    ensureChild(kScriptsName, "Scripts");
+
+    if (lightingNew) {
+        // Hijos por defecto de Lighting (se pueden borrar y reinsertar).
+        static const char* kLightingChildren[] = {
+            "Sky", "Atmosphere", "Clouds", "BloomEffect", "BlurEffect",
+            "ColorCorrectionEffect", "ColorGradingEffect", "DepthOfFieldEffect",
+            "SunRaysEffect"};
+        for (const char* child : kLightingChildren) {
+            SceneObject c;
+            c.name = child;
+            c.className = child;
+            c.parent = kLightingName;
+            objects_.push_back(std::move(c));
+        }
+    }
+
+    // Migracion: cualquier objeto que hoy cuelga directamente de la
+    // dimension (parent vacio) pasa a Workspace.
+    for (SceneObject& o : objects_) {
+        if (o.className == "Dimension") continue;
+        if (o.parent.empty()) o.parent = kWorkspaceName;
+    }
+}
+
+bool Scene::isProtectedName(const std::string& name) const {
+    const SceneObject* o = findByName(name);
+    return o && o->protectedNode;
 }
 
 // Valores del archivo de escena (ASCII, en minusculas); la etiqueta
@@ -76,7 +188,7 @@ bool Scene::renameObject(const std::string& oldName,
     if (newName.empty() || oldName == newName) return false;
     if (findByName(newName)) return false;
     SceneObject* object = findByName(oldName);
-    if (!object) return false;
+    if (!object || object->protectedNode) return false;
     object->name = newName;
     return true;
 }
@@ -84,6 +196,7 @@ bool Scene::renameObject(const std::string& oldName,
 bool Scene::removeObject(const std::string& name) {
     for (auto it = objects_.begin(); it != objects_.end(); ++it) {
         if (it->name == name) {
+            if (it->protectedNode) return false;
             objects_.erase(it);
             return true;
         }
@@ -93,11 +206,12 @@ bool Scene::removeObject(const std::string& name) {
 
 SceneObject& Scene::addCopy(const SceneObject& src, const Vec3& offset) {
     SceneObject obj = src;
-    size_t index = objects_.size();
-    obj.name = index == 0 ? "Part" : "Part" + std::to_string(index);
-    while (findByName(obj.name)) {
-        ++index;
-        obj.name = "Part" + std::to_string(index);
+    obj.protectedNode = false;
+    obj.name = "Part";
+    if (findByName(obj.name)) {
+        size_t i = 1;
+        while (findByName("Part" + std::to_string(i))) ++i;
+        obj.name = "Part" + std::to_string(i);
     }
     obj.position = src.position + offset;
     objects_.push_back(std::move(obj));
@@ -141,7 +255,10 @@ bool Scene::loadFromFile(const std::string& path) {
     objects_.clear();
 
     std::error_code ec;
-    if (!std::filesystem::exists(path, ec)) return true; // escena nueva
+    if (!std::filesystem::exists(path, ec)) {
+        ensureStructure();
+        return true; // escena nueva
+    }
 
     std::ifstream file(path);
     if (!file.is_open()) return false;
@@ -162,6 +279,10 @@ bool Scene::loadFromFile(const std::string& path) {
             haveObject = true;
         } else if (!haveObject) {
             continue; // "version" y claves sueltas antes del primer objeto
+        } else if (key == "clase") {
+            current.className = value;
+        } else if (key == "protegido") {
+            current.protectedNode = (value == "true" || value == "1");
         } else if (key == "parent") {
             current.parent = value;
         } else if (key == "posicion") {
@@ -190,9 +311,26 @@ bool Scene::loadFromFile(const std::string& path) {
             current.canCollide = (value == "true" || value == "1");
         } else if (key == "anchored") {
             current.anchored = (value == "true" || value == "1");
+        } else if (key == "atributo") {
+            // "Nombre|tipo|valor"
+            const size_t p1 = value.find('|');
+            const size_t p2 = p1 == std::string::npos
+                                  ? std::string::npos
+                                  : value.find('|', p1 + 1);
+            if (p1 != std::string::npos && p2 != std::string::npos) {
+                Attribute a;
+                a.name = value.substr(0, p1);
+                a.type = value.substr(p1 + 1, p2 - p1 - 1);
+                a.value = value.substr(p2 + 1);
+                current.attributes.push_back(std::move(a));
+            }
+        } else if (key == "tag") {
+            if (!value.empty()) current.tags.push_back(value);
         }
     }
     if (haveObject) objects_.push_back(current);
+
+    ensureStructure();
     return true;
 }
 
@@ -209,6 +347,8 @@ bool Scene::saveToFile(const std::string& path) const {
     file << "version: 1\n";
     for (const SceneObject& object : objects_) {
         file << "objeto: " << object.name << "\n";
+        file << "clase: " << object.className << "\n";
+        if (object.protectedNode) file << "protegido: true\n";
         if (!object.parent.empty()) file << "parent: " << object.parent << "\n";
         writeVec3(file, "posicion", object.position);
         writeVec3(file, "rotacion", object.rotation);
@@ -223,6 +363,13 @@ bool Scene::saveToFile(const std::string& path) const {
         writeVec3(file, "pivotrotation", object.pivotRotation);
         file << "cancollide: " << (object.canCollide ? "true" : "false") << "\n";
         file << "anchored: " << (object.anchored ? "true" : "false") << "\n";
+        for (const Attribute& a : object.attributes) {
+            file << "atributo: " << a.name << "|" << a.type << "|" << a.value
+                 << "\n";
+        }
+        for (const std::string& tag : object.tags) {
+            file << "tag: " << tag << "\n";
+        }
     }
     return file.good();
 }

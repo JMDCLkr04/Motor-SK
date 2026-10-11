@@ -7,6 +7,7 @@
 #include <cstring>
 #include <map>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -15,6 +16,7 @@
 #include "math/math.h"
 #include "platform/window.h"
 #include "project/project.h"
+#include "project/scripts.h"
 #include "render/renderer.h"
 #include "scene/camera.h"
 #include "scene/gizmo.h"
@@ -24,6 +26,7 @@
 #include "ui/code_view.h"
 #include "ui/docs_view.h"
 #include "ui/place_view.h"
+#include "ui/play_window.h"
 #include "ui/projects_panel.h"
 #include "ui/prompt.h"
 #include "ui/workspace_tabs.h"
@@ -47,6 +50,14 @@ std::string parseProjectArg(int argc, char** argv) {
         }
     }
     return "";
+}
+
+// --play: abre la ventana de Play/Run al arrancar (pruebas).
+bool parsePlayArg(int argc, char** argv) {
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--play") == 0) return true;
+    }
+    return false;
 }
 
 double nowSeconds() {
@@ -76,6 +87,7 @@ int main(int argc, char** argv) {
 
     const int maxFrames = parseFramesArg(argc, argv);
     const std::string startupProject = parseProjectArg(argc, argv);
+    const bool startupPlay = parsePlayArg(argc, argv);
 
     // Medal y OBS registran capas implicitas de Vulkan cuyos hooks
     // interceptan la creacion de swapchain y corrompen el heap de este
@@ -115,6 +127,7 @@ int main(int argc, char** argv) {
     sk::PlaceView place;
     sk::CodeView code;
     sk::DocsView docs;
+    sk::ui::PlayWindow play;
 
     // Seleccion activa (nombres en la escena). "primary" es el ultimo
     // objeto tocado: el que el Explorer marca con el caret.
@@ -197,8 +210,13 @@ int main(int argc, char** argv) {
         active = std::move(p);
         scene.clear();
         scene.loadFromFile(scenePath(active));
+        play.close();
         undoStack.clear(); // cada proyecto parte con historia nueva
         redoStack.clear();
+        // Raices de los grupos sinteticos del Explorer: scripts del
+        // proyecto y biblioteca de assets.
+        place.setScriptsRoot(sk::scripts::rootFolder(active));
+        place.setAssetsRoot(active.folder + "/assets");
         place.rebuildTree(scene.objects());  // Explorer con la jerarquia
         view3d = true;
         panel.setVisible(false);
@@ -220,6 +238,7 @@ int main(int argc, char** argv) {
     // persistir y limpia la seleccion para el siguiente proyecto.
     auto closeProject = [&]() {
         saveScene();
+        play.close();
         view3d = false;
         selection.clear();
         primary.clear();
@@ -255,6 +274,11 @@ int main(int argc, char** argv) {
         window.destroy();
         return 1;
     }
+
+    // El panel Output de PLACE recibe copia de todos los SK_INFO/WARN/ERROR.
+    sk::setLogSink([&place](sk::LogLevel level, const std::string& message) {
+        place.appendOutput(static_cast<int>(level), message);
+    });
 
     if (!code.create(window.nativeHandle())) {
         code.destroy();
@@ -446,7 +470,11 @@ int main(int argc, char** argv) {
                 "Herramientas .......... 1, 2, 3, 4\n"
                 "Camara ................ WASD + clic derecho, rueda, Q/E\n"
                 "Foco en la seleccion .. F\n"
-                "Renombrar parte ....... F12\n"
+                "Renombrar parte ....... F2\n"
+                "Referencia de clases .. F1\n"
+                "Agrupar/Desagrupar .... Ctrl+G / Ctrl+U\n"
+                "Bloquear (Lock) ....... Ctrl+L\n"
+                "Anclar (Anchor) ....... Alt+A\n"
                 "Deshacer/Rehacer ...... Ctrl+Z / Ctrl+Y\n"
                 "Copiar/Cortar/Pegar ... Ctrl+C / Ctrl+X / Ctrl+V\n"
                 "Clonar ................ Ctrl+D\n"
@@ -590,6 +618,96 @@ int main(int argc, char** argv) {
         SK_INFO("Properties %s: pivot[%d] = %.3g", name.c_str(), idx, value);
     });
 
+    // Attributes: parsea "nombre | tipo | valor" por linea al objeto.
+    place.setOnAttributesEdited(
+        [&](const std::string& name, const std::string& text) {
+            sk::SceneObject* object = scene.findByName(name);
+            if (!object) return;
+            std::vector<sk::Attribute> parsed;
+            std::string line;
+            std::istringstream stream(text);
+            while (std::getline(stream, line)) {
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                // Recorta y salta lineas vacias.
+                size_t a = line.find_first_not_of(" \t");
+                if (a == std::string::npos) continue;
+                size_t b = line.find_last_not_of(" \t");
+                line = line.substr(a, b - a + 1);
+                if (line.empty()) continue;
+                sk::Attribute attr;
+                size_t p1 = line.find('|');
+                size_t p2 = p1 == std::string::npos
+                                ? std::string::npos
+                                : line.find('|', p1 + 1);
+                if (p1 == std::string::npos) {
+                    attr.name = line;
+                } else if (p2 == std::string::npos) {
+                    attr.name = line.substr(0, p1);
+                    attr.value = line.substr(p1 + 1);
+                } else {
+                    attr.name = line.substr(0, p1);
+                    attr.type = line.substr(p1 + 1, p2 - p1 - 1);
+                    attr.value = line.substr(p2 + 1);
+                }
+                auto trim = [](std::string s) {
+                    size_t f = s.find_first_not_of(" \t");
+                    size_t l = s.find_last_not_of(" \t");
+                    return f == std::string::npos ? std::string()
+                                                  : s.substr(f, l - f + 1);
+                };
+                attr.name = trim(attr.name);
+                attr.type = trim(attr.type);
+                attr.value = trim(attr.value);
+                if (attr.type.empty()) attr.type = "text";
+                if (!attr.name.empty()) parsed.push_back(std::move(attr));
+            }
+            if (parsed == object->attributes) return;
+            captureState();
+            object->attributes = std::move(parsed);
+            saveScene();
+            SK_INFO("Attributes de %s actualizados", name.c_str());
+        });
+
+    // Tags: una etiqueta por linea.
+    place.setOnTagsEdited([&](const std::string& name, const std::string& text) {
+        sk::SceneObject* object = scene.findByName(name);
+        if (!object) return;
+        std::vector<std::string> tags;
+        std::string line;
+        std::istringstream stream(text);
+        while (std::getline(stream, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            size_t a = line.find_first_not_of(" \t");
+            if (a == std::string::npos) continue;
+            size_t b = line.find_last_not_of(" \t");
+            tags.push_back(line.substr(a, b - a + 1));
+        }
+        if (tags == object->tags) return;
+        captureState();
+        object->tags = std::move(tags);
+        saveScene();
+        SK_INFO("Tags de %s actualizados", name.c_str());
+    });
+
+    // Boton "+" del Explorer: inserta una clase bajo el nodo indicado.
+    place.setOnInsertClass([&](const std::string& parent,
+                               const std::string& className) {
+        if (!scene.findByName(parent)) return;
+        captureState();
+        sk::SceneObject& created = scene.addNode(className, parent);
+        const std::string createdName = created.name;
+        saveScene();
+        place.rebuildTree(scene.objects());
+        selection = {createdName};
+        primary = createdName;
+        if (const sk::SceneObject* object = scene.findByName(createdName)) {
+            place.showObject(*object);
+        }
+        place.syncTreeSelection(createdName);
+        SK_INFO("Insertado %s \"%s\" en %s", className.c_str(),
+                createdName.c_str(), parent.c_str());
+    });
+
     // CODE: el panel Properties consulta el objeto asociado a un script.
     code.setOnQueryAssoc([&](const std::string& rel) -> std::string {
         for (const sk::SceneObject& object : scene.objects()) {
@@ -635,6 +753,25 @@ int main(int argc, char** argv) {
     }
 
     sk::Camera camera;
+
+    // Botones Play/Run/Stop de la banda: Play y Run abren una ventana
+    // aparte con su propio renderer (Run ademas ejecutaria los scripts);
+    // Stop la cierra. Requieren un proyecto abierto.
+    workspace.setOnPlay([&]() {
+        if (active.folder.empty()) return;
+        play.open(scene, camera, false);
+    });
+    workspace.setOnRun([&]() {
+        if (active.folder.empty()) return;
+        play.open(scene, camera, true);
+    });
+    workspace.setOnStop([&]() { play.close(); });
+
+    // Pruebas: si se pidio --play, abre la ventana de ejecucion ya.
+    if (startupPlay && !active.folder.empty()) {
+        play.open(scene, camera, true);
+    }
+
     const double startTime = nowSeconds();
     double lastTime = startTime;
     int frame = 0;
@@ -656,6 +793,11 @@ int main(int argc, char** argv) {
     bool redoKeyWasDown = false;
     bool f12KeyWasDown = false;
     bool fKeyWasDown = false;
+    bool f1KeyWasDown = false;
+    bool groupKeyWasDown = false;
+    bool ungroupKeyWasDown = false;
+    bool lockKeyWasDown = false;
+    bool anchorKeyWasDown = false;
     auto edge = [](bool now, bool& was) {
         const bool rising = now && !was;
         was = now;
@@ -1149,6 +1291,131 @@ place.setOnReparent([&](const std::string& child,
                                 center.y, center.z);
                     }
                 }
+
+                // F1: abre la Referencia de clases en la clase del objeto
+                // activo (o "Part" si no hay seleccion).
+                if (edge(window.keyDown(VK_F1), f1KeyWasDown)) {
+                    const sk::SceneObject* object =
+                        primary.empty() ? nullptr : scene.findByName(primary);
+                    const std::string className =
+                        object ? object->className : std::string("Part");
+                    place.setVisible(false);
+                    code.setVisible(false);
+                    docs.setVisible(true);
+                    docs.showClass(className);
+                    workspace.setDocsActive(true);
+                    SK_INFO("Referencia de clases: %s", className.c_str());
+                }
+
+                // Ctrl+G: agrupa la seleccion bajo un Model nuevo.
+                const bool groupDown = ctrlDown && window.keyDown('G');
+                if (edge(groupDown, groupKeyWasDown) &&
+                    !selection.empty()) {
+                    std::string parent;
+                    if (const sk::SceneObject* first =
+                            scene.findByName(selection.front())) {
+                        parent = first->parent;
+                    }
+                    if (parent.empty()) parent = sk::kWorkspaceName;
+                    captureState();
+                    const std::string modelName =
+                        scene.addNode("Model", parent).name;
+                    for (const std::string& name : selection) {
+                        sk::SceneObject* object = scene.findByName(name);
+                        if (!object || object->protectedNode) continue;
+                        if (object->name == modelName) continue;
+                        object->parent = modelName;
+                    }
+                    saveScene();
+                    place.rebuildTree(scene.objects());
+                    applySelection({modelName}, modelName);
+                    logProjection = true;
+                    SK_INFO("Grupo %s con %d objeto(s)", modelName.c_str(),
+                            static_cast<int>(selection.size()));
+                }
+
+                // Ctrl+U: desagrupa los Model/Folder seleccionados (sus
+                // hijos suben al padre del grupo).
+                const bool ungroupDown = ctrlDown && window.keyDown('U');
+                if (edge(ungroupDown, ungroupKeyWasDown) &&
+                    !selection.empty()) {
+                    bool changed = false;
+                    std::vector<std::string> toRemove;
+                    for (const std::string& name : selection) {
+                        const sk::SceneObject* object = scene.findByName(name);
+                        if (!object || object->protectedNode) continue;
+                        if (object->className != "Model" &&
+                            object->className != "Folder") {
+                            continue;
+                        }
+                        changed = true;
+                        for (sk::SceneObject& child : scene.objects()) {
+                            if (child.parent == name) child.parent = object->parent;
+                        }
+                        toRemove.push_back(name);
+                    }
+                    if (changed) {
+                        captureState();
+                        for (const std::string& name : toRemove) {
+                            scene.removeObject(name);
+                        }
+                        saveScene();
+                        place.rebuildTree(scene.objects());
+                        applySelection({}, "");
+                        logProjection = true;
+                        SK_INFO("Desagrupado %d contenedor(es)",
+                                static_cast<int>(toRemove.size()));
+                    }
+                }
+
+                // Ctrl+L: bloquea/desbloquea (Data.Locked) la seleccion.
+                const bool lockDown = ctrlDown && window.keyDown('L');
+                if (edge(lockDown, lockKeyWasDown) && !selection.empty()) {
+                    bool any = false;
+                    for (const std::string& name : selection) {
+                        if (const sk::SceneObject* o = scene.findByName(name)) {
+                            if (!o->protectedNode) any = true;
+                        }
+                    }
+                    if (any) {
+                        captureState();
+                        for (const std::string& name : selection) {
+                            sk::SceneObject* o = scene.findByName(name);
+                            if (o && !o->protectedNode) o->locked = !o->locked;
+                        }
+                        saveScene();
+                        const sk::SceneObject* o =
+                            scene.findByName(selection.front());
+                        if (o) place.showObject(*o);
+                        SK_INFO("Bloqueado: %d objeto(s)",
+                                static_cast<int>(selection.size()));
+                    }
+                }
+
+                // Alt+A: ancla/desancla (Data.Anchored) la seleccion.
+                const bool altDown = (GetKeyState(VK_MENU) & 0x8000) != 0;
+                const bool anchorDown = altDown && window.keyDown('A');
+                if (edge(anchorDown, anchorKeyWasDown) && !selection.empty()) {
+                    bool any = false;
+                    for (const std::string& name : selection) {
+                        if (const sk::SceneObject* o = scene.findByName(name)) {
+                            if (!o->protectedNode) any = true;
+                        }
+                    }
+                    if (any) {
+                        captureState();
+                        for (const std::string& name : selection) {
+                            sk::SceneObject* o = scene.findByName(name);
+                            if (o && !o->protectedNode) o->anchored = !o->anchored;
+                        }
+                        saveScene();
+                        const sk::SceneObject* o =
+                            scene.findByName(selection.front());
+                        if (o) place.showObject(*o);
+                        SK_INFO("Anclado: %d objeto(s)",
+                                static_cast<int>(selection.size()));
+                    }
+                }
             }
         }
 
@@ -1588,6 +1855,7 @@ place.setOnReparent([&](const std::string& child,
         models.reserve(scene.objects().size());
         shapeIds.reserve(scene.objects().size());
         for (const sk::SceneObject& object : scene.objects()) {
+            if (!sk::isRenderableClass(object.className)) continue;
             models.push_back(object.modelMatrix());
             shapeIds.push_back(static_cast<int>(object.shape));
         }
@@ -1654,6 +1922,9 @@ place.setOnReparent([&](const std::string& child,
             SK_ERROR("drawFrame fallo");
             return 1;
         }
+
+        // Ventana Play/Run: su propio renderer, mismo bucle principal.
+        play.renderFrame(scene, camera);
 
         ++frame;
     }

@@ -152,6 +152,9 @@ bool pickObjectFace(const Scene& scene, const Ray& ray,
     float bestT = FLT_MAX;
     bool found = false;
     for (const SceneObject& object : scene.objects()) {
+        // Solo las clases con geometria se pueden seleccionar; los nodos
+        // contenedores/servicios no se dibujan.
+        if (!isRenderableClass(object.className)) continue;
         // Una part Locked no se puede seleccionar en el viewport (sigue
         // contando como superficie para el snap: eso lo hace rayObjectFace).
         if (object.locked) continue;
@@ -197,6 +200,7 @@ std::vector<std::string> selectInRect(const Scene& scene, const Mat4& viewProj,
 
     std::vector<std::string> hits;
     for (const SceneObject& object : scene.objects()) {
+        if (!isRenderableClass(object.className)) continue;
         // Las parts Locked quedan fuera del marquee (no se seleccionan).
         if (object.locked) continue;
         const Mat4 mvp = viewProj * object.modelMatrix();

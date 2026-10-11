@@ -41,6 +41,18 @@ public:
     bool create(void* parentHwnd);
     void destroy();
 
+    // Rutas base que alimentan los grupos sinteticos del Explorer:
+    // "Scripts" (carpetas globales Server/Shared/Player/Character) y
+    // "Assets" (Models/Meshes/Images/Textures/Audio/Animations/
+    // ModuleScripts). Se leen del disco al reconstruir el arbol.
+    void setScriptsRoot(const std::string& path) { scriptsRoot_ = path; }
+    void setAssetsRoot(const std::string& path) { assetsRoot_ = path; }
+
+    // Panel Output (pestana izquierda): agrega una linea con el color
+    // segun el nivel (0 info, 1 aviso, 2 error). El dueno engancha aqui
+    // el sink de SK_INFO/WARN/ERROR.
+    void appendOutput(int level, const std::string& message);
+
     void setVisible(bool visible);
     bool visible() const { return visible_; }
 
@@ -133,6 +145,28 @@ public:
         onPivotEdited_ = std::move(cb);
     }
 
+    // Seccion Attributes (id 700): el usuario edito el texto multilinea
+    // ("nombre | tipo | valor" por linea). El dueno lo parsea, lo aplica
+    // al objeto y guarda.
+    void setOnAttributesEdited(
+        std::function<void(const std::string&, const std::string&)> cb) {
+        onAttributesEdited_ = std::move(cb);
+    }
+
+    // Seccion Tags (id 701): una etiqueta por linea.
+    void setOnTagsEdited(
+        std::function<void(const std::string&, const std::string&)> cb) {
+        onTagsEdited_ = std::move(cb);
+    }
+
+    // Boton "+" del Explorer: insertar una clase del catalogo bajo el
+    // objeto indicado (parent). El dueno crea el nodo y reconstruye.
+    void setOnInsertClass(
+        std::function<void(const std::string& parent,
+                           const std::string& className)> cb) {
+        onInsertClass_ = std::move(cb);
+    }
+
     // Renombra el nodo del Explorer (oldName -> newName) sin disparar
     // onSelectionChanged: el caret sigue en el mismo nodo.
     void renameTreeItem(const std::string& oldName, const std::string& newName);
@@ -161,12 +195,20 @@ private:
     void updateSummaries();
     void notifySelection();
     void scrollBy(int dy);
+    void switchLeftTab(int tab);
+    void switchRightTab(int tab);
 
     void* parent_ = nullptr;
     void* explorer_ = nullptr;
     void* properties_ = nullptr;
     void* tree_ = nullptr;
+    void* output_ = nullptr;      // EDIT multiline (pestana Output)
+    void* assetsTree_ = nullptr;  // TreeView (pestana Assets)
+    int leftTab_ = 0;             // 0 Properties, 1 Output
+    int rightTab_ = 0;            // 0 Explorer, 1 Assets
     void* root_ = nullptr;   // HTREEITEM de dimension01
+    std::string scriptsRoot_;  // carpeta scripts/ del proyecto
+    std::string assetsRoot_;   // carpeta assets/ del proyecto (o raiz)
     // Arrastre del Explorer: nodo en curso, nodo de destino (resaltado
     // con TreeView_SelectDropTarget) y si el raton esta enganchado.
     HTREEITEM dragItem_ = nullptr;
@@ -182,14 +224,14 @@ private:
     // Data, Transform, Pivot, Collision) y, dentro de Transform/Pivot,
     // una por fila. tri*_ es la zona de click del triangulito (cliente
     // del panel: x0, y0, x1, y1; vacia si la cascada no se muestra).
-    bool catOpen_[5] = {true, true, true, true, true};
+    bool catOpen_[7] = {true, true, true, true, true, true, true};
     bool rowOpen_[3] = {false, false, false};
     bool pivotRowOpen_[2] = {false, false};
     // Estado de los checkboxes (ids 400..403): BS_OWNERDRAW solo, asi que
     // el estado lo llevamos aqui (BM_GETCHECK requiere BS_CHECKBOX, que
     // no se puede combinar con BS_OWNERDRAW sin perder los clicks).
     bool checkState_[4] = {};
-    int triCat_[5][4] = {};
+    int triCat_[7][4] = {};
     int triRow_[3][4] = {};
     int triPivotRow_[2][4] = {};
     // Ultimo texto de los resumenes "x, y, z" (ids 300..302).
@@ -217,6 +259,14 @@ private:
     std::function<void(const std::string&, int, bool)> onBoolEdited_;
     std::function<void(const std::string&, int, float)> onFloatEdited_;
     std::function<void(const std::string&, int, float)> onPivotEdited_;
+    std::function<void(const std::string&, const std::string&)>
+        onAttributesEdited_;
+    std::function<void(const std::string&, const std::string&)> onTagsEdited_;
+    std::function<void(const std::string&, const std::string&)>
+        onInsertClass_;
+
+    // Abre el selector de clase del boton "+" para el nodo indicado.
+    void openClassPicker(void* treeHwnd, const std::string& parentName);
 };
 
 } // namespace sk

@@ -25,6 +25,11 @@ public:
 
     bool shouldClose() const { return shouldClose_; }
 
+    // Ventanas secundarias (Play/Run): al cerrarse no deben terminar la
+    // aplicacion (no postean WM_QUIT). closed() avisa de su cierre.
+    void setQuitOnClose(bool value) { quitOnClose_ = value; }
+    bool closed() const { return closed_; }
+
     bool keyDown(int vk) const;
 
     // true si esta ventana es la de primer plano: el teclado no debe
@@ -71,6 +76,8 @@ private:
     void* instance_ = nullptr;
 
     bool shouldClose_ = false;
+    bool closed_ = false;
+    bool quitOnClose_ = true;
     bool rmbDown_ = false;
     bool lmbDown_ = false;
     bool resized_ = false;

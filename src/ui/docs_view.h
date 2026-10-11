@@ -2,6 +2,8 @@
 
 #include <windows.h>
 
+#include <string>
+
 namespace sk {
 
 // Vista "Documentacion de clases": reemplaza al viewport 3D. A la izquierda
@@ -27,6 +29,10 @@ public:
 
     // width/height son los de la ventana principal.
     void resize(int width, int height);
+
+    // Selecciona la clase con ese nombre (para F1 desde un objeto); si no
+    // existe, deja la seleccion como esta.
+    void showClass(const std::string& className);
 
 private:
     static long long __stdcall wndProc(void* hwnd, unsigned int msg,

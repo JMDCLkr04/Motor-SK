@@ -241,7 +241,8 @@ long long __stdcall Window::wndProc(void* hwndPtr, unsigned int msg, unsigned lo
                 return 0;
             }
             case WM_DESTROY: {
-                PostQuitMessage(0);
+                self->closed_ = true;
+                if (self->quitOnClose_) PostQuitMessage(0);
                 return 0;
             }
             default:

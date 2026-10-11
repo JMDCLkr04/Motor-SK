@@ -127,6 +127,24 @@ Ejecutable `.exe` con:
         lo devuelve a la raiz); la escena persiste `parent:` de cada objeto y
         borrar/cortar/renombrar/pegar/clonar/importar/deshacer respetan la
         jerarquia (sin ciclos; el render todavia usa posiciones absolutas)
+- [x] Catalogo unico de clases (`scene/class_catalog`): 19 categorias y ~145
+        clases con descripcion, propiedades y valores por defecto; fuente
+        unica de la Referencia de clases, las Properties, el buscador del `+`
+        y los iconos
+- [x] Referencia de clases (F1): lista owner-draw con icono + nombre +
+        descripcion y tabla de propiedades por defecto tomada del catalogo
+- [x] Boton `+` del Explorer: selector emergente con buscador que inserta
+        cualquier clase insertable del catalogo bajo el nodo elegido
+- [x] Pestañas de panel: Properties | Output (log del motor) a la izquierda
+        y Explorer | Assets (biblioteca del proyecto) a la derecha
+- [x] Attributes y Tags en Properties (multilinea `nombre|tipo|valor` y una
+        etiqueta por linea), persistidos en la escena
+- [x] Atajos de edicion ampliados: Ctrl+G agrupar, Ctrl+U desagrupar,
+        Ctrl+L bloquear, Alt+A anclar y F2 renombrar
+- [x] Botones Play/Run/Stop: abren una ventana aparte con su propio
+        renderer Vulkan que dibuja la escena con la camara del editor; Play
+        simula y Run ejecutara los ModelScripts cuando exista el interprete;
+        Stop (o cerrar la ventana) la cierra sin afectar al editor
 
 ## Fase 2 — Render básico
 

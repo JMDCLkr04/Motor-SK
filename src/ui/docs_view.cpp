@@ -6,6 +6,7 @@
 #include <cstring>
 
 #include "../core/log.h"
+#include "../scene/class_catalog.h"
 #include "theme.h"
 #include "workspace_tabs.h"
 
@@ -470,6 +471,23 @@ void DocsView::setVisible(bool visible) {
 
 void DocsView::resize(int width, int height) { layout(width, height); }
 
+void DocsView::showClass(const std::string& className) {
+    HWND list = static_cast<HWND>(list_);
+    if (!list) return;
+    const int count = ListView_GetItemCount(list);
+    for (int i = 0; i < count; ++i) {
+        if (i < 0 || i >= kClassCount) break;
+        if (className == kClasses[i].name) {
+            sel_ = i;
+            ListView_SetItemState(list, i, LVIS_SELECTED | LVIS_FOCUSED,
+                                  LVIS_SELECTED | LVIS_FOCUSED);
+            ListView_EnsureVisible(list, i, FALSE);
+            updateDetails();
+            return;
+        }
+    }
+}
+
 void DocsView::buildClassList() {
     HWND list = static_cast<HWND>(list_);
     if (!list) return;
@@ -506,10 +524,24 @@ void DocsView::updateDetails() {
     if (desc_) {
         SetWindowTextA(static_cast<HWND>(desc_), c.shortDesc);
     }
-    // La tabla "Propiedades" se completa en una iteracion posterior; de
-    // momento queda vacia.
+    // Tabla "Propiedades": valores por defecto tomados del catalogo
+    // compartido (misma fuente que usa el boton "+" y las Properties).
     if (props_) {
-        ListView_DeleteAllItems(static_cast<HWND>(props_));
+        HWND list = static_cast<HWND>(props_);
+        ListView_DeleteAllItems(list);
+        if (const catalog::ClassDef* def = catalog::findClass(c.name)) {
+            for (int i = 0; i < def->propCount; ++i) {
+                const catalog::PropDef& p = def->props[i];
+                LVITEMA item{};
+                item.mask = LVIF_TEXT;
+                item.iItem = i;
+                item.pszText = const_cast<char*>(p.name);
+                ListView_InsertItem(list, &item);
+                char value[160]{};
+                lstrcpynA(value, p.def, 160);
+                ListView_SetItemText(list, i, 1, value);
+            }
+        }
     }
 }
 

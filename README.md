@@ -17,14 +17,23 @@ abrir, renombrar y borrar proyectos; al abrir uno entra el **editor 3D**:
 - **Banda superior** con menú **Archivo** (Cerrar, Guardar, Guardar como,
   Importar/Importar como `.scene`, Salir y acceso a configuración/atajos/
   autosaves informativos), **barra de herramientas** (Select, Move, Scale,
-  Rotate, Part con menú de formas) y pestañas **PLACE / CODE / GUI**.
-- **PLACE**: **Explorer** jerárquico a la derecha (triángulos para plegar/
-  desplegar y arrastrar un objeto sobre otro para anidarlo) y **Properties**
-  a la izquierda (Nombre editable, Parent real, Transform en cascadas,
-  Appearance/Data/Collision y Pivot).
-- Atajos: **1-4** herramientas, **Ctrl+Z/Y** deshacer/rehacer, **F12** renombrar,
+  Rotate, Part con menú de formas), botones **Play/Run/Stop** (abren una
+  ventana aparte que renderiza la escena con su propio renderer; Run además
+  ejecuta los scripts) y pestañas **PLACE / CODE / GUI**.
+- **PLACE**: a la derecha, pestañas **Explorer | Assets**. El **Explorer**
+  jerárquico con dos grupos de nivel superior (**Dimensions** y **Scripts**);
+  dentro de la dimensión cuelgan `Workspace`, `Camera`, `Lighting` (con sus
+  efectos) y `Scripts` (nodos protegidos: no se renombran ni se borran), y cada
+  nodo de escena lleva el botón **`+`** para insertar una clase del catálogo.
+  Arrastrar un objeto sobre otro lo anida. La pestaña **Assets** muestra la
+  biblioteca del proyecto. A la izquierda, pestañas **Properties | Output**:
+  **Properties** (Nombre editable, Parent real, ClassName, Transform en
+  cascadas, Appearance/Data/Collision, Pivot, Attributes y Tags) y **Output**
+  (log del motor).
+- Atajos: **1-4** herramientas, **Ctrl+Z/Y** deshacer/rehacer, **F2** renombrar,
   **F** enfocar selección, **Ctrl+C/X/V/D** portapapeles y **Ctrl+R/T** rotar,
-  **Supr/Retroceso** borrar, **Esc** volver al panel.
+  **Ctrl+G/U** agrupar/desagrupar, **Ctrl+L** bloquear, **Alt+A** anclar,
+  **F1** Referencia de clases, **Supr/Retroceso** borrar, **Esc** volver al panel.
 - **CODE**: organizador de ModelScripts (Server/Shared/Player/Character) con
   editor de scripts y asociación a los objetos de la escena.
 - Todo persiste en la escena del proyecto (`escenas/inicio.scene`, texto
@@ -56,6 +65,7 @@ Flags para pruebas:
 
 - `--frames N`: sale tras N frames (smoke test sin interacción)
 - `--proyecto <ruta>`: arranca directamente en la vista 3D de ese proyecto
+- `--play`: abre además la ventana Play/Run al arrancar (pruebas)
 
 ## Proyectos
 
