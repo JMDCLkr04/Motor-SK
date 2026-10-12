@@ -9,6 +9,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include "core/config.h"
@@ -19,12 +20,17 @@
 #include "project/scripts.h"
 #include "render/renderer.h"
 #include "scene/camera.h"
+#include "scene/commands.h"
 #include "scene/gizmo.h"
+#include "scene/instance.h"
 #include "scene/picking.h"
-#include "scene/scene.h"
+#include "scene/shape.h"
 #include "scene/snapping.h"
+#include "scene/world.h"
 #include "ui/code_view.h"
 #include "ui/docs_view.h"
+#include "ui/kit/demo_window.h"
+#include "ui/kit/icon_atlas.h"
 #include "ui/place_view.h"
 #include "ui/play_window.h"
 #include "ui/projects_panel.h"
@@ -60,6 +66,14 @@ bool parsePlayArg(int argc, char** argv) {
     return false;
 }
 
+// --stats: imprime cada 5 s los frames dibujados y el tiempo medio.
+bool parseStatsArg(int argc, char** argv) {
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--stats") == 0) return true;
+    }
+    return false;
+}
+
 double nowSeconds() {
     static LARGE_INTEGER frequency = [] {
         LARGE_INTEGER f{};
@@ -88,6 +102,14 @@ int main(int argc, char** argv) {
     const int maxFrames = parseFramesArg(argc, argv);
     const std::string startupProject = parseProjectArg(argc, argv);
     const bool startupPlay = parsePlayArg(argc, argv);
+    const bool statsEnabled = parseStatsArg(argc, argv);
+
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--ui-demo") == 0) {
+            sk::ui::runUIDemo();
+            return 0;
+        }
+    }
 
     // Medal y OBS registran capas implicitas de Vulkan cuyos hooks
     // interceptan la creacion de swapchain y corrompen el heap de este
@@ -96,6 +118,8 @@ int main(int argc, char** argv) {
     _putenv_s("DISABLE_VULKAN_MEDAL_OBS_CAPTURE", "1");
     _putenv_s("DISABLE_VULKAN_OBS_CAPTURE", "1");
     SK_INFO("Capas de captura de Medal/OBS desactivadas");
+
+    sk::ui::initIconAtlas();
 
     sk::Window window;
     if (!window.create(1280, 720, "Motor SK")) {
@@ -120,7 +144,7 @@ int main(int argc, char** argv) {
     // modo menu: panel Win32 visible; modo vista3d: render + camara.
     bool view3d = false;
     sk::Project active;
-    sk::Scene scene;   // objetos Part de la division PLACE
+    sk::World world; // arbol de objetos de la division PLACE
 
     sk::ProjectsPanel panel;
     sk::WorkspaceTabs workspace;
@@ -129,73 +153,183 @@ int main(int argc, char** argv) {
     sk::DocsView docs;
     sk::ui::PlayWindow play;
 
-    // Seleccion activa (nombres en la escena). "primary" es el ultimo
-    // objeto tocado: el que el Explorer marca con el caret.
-    std::vector<std::string> selection;
-    std::string primary;
+    // Seleccion activa (ids de instancia). "primary" es el ultimo objeto
+    // tocado: el que el Explorer marca con el caret.
+    std::vector<sk::InstanceId> selection;
+    sk::InstanceId primary = sk::kInvalidId;
     // Log de posiciones en pantalla: al cambiar la escena, para que las
     // pruebas sepan donde hacer click.
     bool logProjection = false;
+
+    // --- Redibujado bajo demanda ---
+    // Solo se llama a drawFrame cuando algo ha cambiado; en reposo el
+    // bucle duerme en MsgWaitForMultipleObjects (0% CPU).
+    bool needsRedraw = true;
+    bool continuous = false; // interaccion sostenida (camara/drag/play)
+    // Version del contenido (escena + seleccion + herramienta): models,
+    // shapeIds y outlines (mas el marquee/gizmo) solo se reconstruyen
+    // cuando cambia, no en cada frame.
+    unsigned long long contentVersion = 0;
+    unsigned long long builtVersion = ~0ull;
+    std::vector<sk::Mat4> modelCache;
+    std::vector<int> shapeCache;
+    std::vector<sk::Mat4> outlineCache;
+    std::vector<sk::LineVertex> lastGizmo;
+    int lastDrawnHover = -1;
+
+    // --- Guardado diferido ---
+    // Las ediciones marcan la escena como sucia; el bucle escribe 500 ms
+    // despues del ultimo cambio (o al cerrar/salir/Guardar). Nunca a
+    // mitad de un arrastre.
+    bool sceneDirty = false;
+    double lastSceneChange = 0.0;
+
+    // --- Limite de FPS (60; 30 si el dispositivo Vulkan es software) ---
+    const double fpsTarget = renderer.softwareDevice() ? 30.0 : 60.0;
+    const double frameInterval = 1.0 / fpsTarget;
+    double lastDrawWall = 0.0;
+
+    // --- --stats ---
+    double statsWindowStart = nowSeconds();
+    unsigned long long statsFrames = 0;
+    double statsAccum = 0.0;
 
     // Ruta absoluta de la escena del proyecto (escenas/inicio.scene).
     auto scenePath = [](const sk::Project& p) {
         return p.folder + "/" + p.scene;
     };
     auto saveScene = [&]() {
-        if (active.folder.empty()) return;
+        // Guardado diferido: marca la escena como sucia y pide redibujado.
+        // El bucle escribe en disco 500 ms despues del ultimo cambio (o al
+        // cerrar el proyecto / salir / menu Guardar), sin escribir a mitad
+        // de un arrastre.
+        sceneDirty = true;
+        lastSceneChange = nowSeconds();
+        needsRedraw = true;
+        ++contentVersion;
+    };
+    auto writeSceneNow = [&]() {
+        if (active.folder.empty()) {
+            sceneDirty = false;
+            return;
+        }
         const std::string path = scenePath(active);
-        if (!scene.saveToFile(path)) {
+        if (!world.saveToFile(path)) {
             SK_ERROR("No se pudo guardar la escena: %s", path.c_str());
         }
+        sceneDirty = false;
     };
 
-    // Historia de deshacer/rehacer (Ctrl+Z / Ctrl+Y): snapshot completo
-    // de la escena (objetos + seleccion) antes de cada mutacion de la
-    // division PLACE. Deshacer restaura el anterior, rehacer vuelve a
-    // aplicarlo; el limite evita que la pila crezca sin fin.
-    struct SceneSnapshot {
-        std::vector<sk::SceneObject> objects;
-        std::vector<std::string> selection;
-        std::string primary;
+    // Historia de deshacer/rehacer (Ctrl+Z / Ctrl+Y): comandos con deltas
+    // sobre el World. push ejecuta; undo/redo aplican el delta inverso.
+    sk::UndoStack undo;
+
+    // Nombre actual de una instancia ("" si no existe).
+    auto worldName = [&](sk::InstanceId id) -> std::string {
+        const sk::Instance* o = world.find(id);
+        return o ? o->name() : std::string();
     };
-    constexpr int kUndoLimit = 50;
-    std::vector<SceneSnapshot> undoStack;
-    std::vector<SceneSnapshot> redoStack;
-    auto captureState = [&]() {
-        if (undoStack.size() >= kUndoLimit) {
-            undoStack.erase(undoStack.begin());
+
+    // Workspace de la primera dimension (padre por defecto de lo nuevo).
+    auto defaultParent = [&]() -> sk::InstanceId {
+        const std::vector<sk::InstanceId> dims = world.dimensions();
+        if (dims.empty()) return sk::kInvalidId;
+        return world.findChild(dims.front(), sk::kWorkspaceName);
+    };
+
+    // Posicion de la proxima Part: rejilla 4 columnas, elevada 0.5.
+    auto nextPartPos = [&]() -> sk::Vec3 {
+        const int n = static_cast<int>(world.renderParts().size());
+        return {static_cast<float>(n % 4) * 1.6f - 2.4f, 0.5f,
+                static_cast<float>(n / 4) * 1.6f};
+    };
+
+    // Todos los ids del World (raices y descendientes).
+    auto allInstances = [&]() {
+        std::vector<sk::InstanceId> out;
+        for (sk::InstanceId r : world.roots()) {
+            for (sk::InstanceId s : world.subtree(r)) out.push_back(s);
         }
-        undoStack.push_back({scene.objects(), selection, primary});
-        redoStack.clear();
+        return out;
+    };
+
+    // Copia (valor) de un subarbol, raiz primero.
+    auto captureNodes = [&](sk::InstanceId id) {
+        std::vector<sk::Instance> out;
+        for (sk::InstanceId s : world.subtree(id)) {
+            if (const sk::Instance* o = world.find(s)) out.push_back(*o);
+        }
+        return out;
+    };
+
+    // Ids seleccionados que no estan cubiertos por otro seleccionado
+    // (evita borrar/copiar dos veces un subarbol). Excluye protegidos.
+    auto topLevelSelection = [&]() {
+        std::vector<sk::InstanceId> out;
+        std::unordered_set<sk::InstanceId> sel(selection.begin(),
+                                               selection.end());
+        for (sk::InstanceId id : selection) {
+            if (!world.exists(id) || world.isProtected(id)) continue;
+            bool covered = false;
+            sk::InstanceId p = world.find(id)->parentId();
+            while (p != sk::kInvalidId) {
+                if (sel.count(p)) {
+                    covered = true;
+                    break;
+                }
+                const sk::Instance* pi = world.find(p);
+                p = pi ? pi->parentId() : sk::kInvalidId;
+            }
+            if (!covered) out.push_back(id);
+        }
+        return out;
+    };
+
+    auto rebuildExplorer = [&]() { place.rebuildTree(world); };
+
+    // Pinta Properties + caret del Explorer tras cambiar la seleccion.
+    auto applySelection = [&](std::vector<sk::InstanceId> ids,
+                              sk::InstanceId newPrimary) {
+        selection = std::move(ids);
+        primary = newPrimary;
+        needsRedraw = true;
+        ++contentVersion; // el contorno de seleccion cambia
+        place.syncTreeSelection(primary);
+        if (selection.empty()) {
+            place.showNoSelection();
+        } else if (selection.size() == 1) {
+            const sk::Instance* object = world.find(selection.front());
+            if (object) {
+                place.showObject(*object);
+            } else {
+                place.showNoSelection();
+            }
+        } else {
+            place.showMultiple(static_cast<int>(selection.size()));
+        }
     };
 
     // Renombrar una Part (campo Nombre de Properties o tecla F12): lo
-    // aplica a la escena, al Explorer y al resto de paneles. Devuelve
-    // false y no toca nada si el cambio no es valido (vacio, igual,
-    // duplicado o inexistente).
-    auto doRename = [&](const std::string& oldName,
-                        const std::string& newName) -> bool {
+    // aplica al World, al Explorer y al resto de paneles. Devuelve false
+    // y no toca nada si el cambio no es valido (vacio, igual, duplicado,
+    // protegido o inexistente).
+    auto doRename = [&](sk::InstanceId id, const std::string& newName) -> bool {
+        const sk::Instance* object = world.find(id);
+        if (!object || object->isProtected()) return false;
+        const std::string oldName = object->name();
         if (newName.empty() || oldName == newName) return false;
-        if (!scene.findByName(oldName)) return false;
-        if (scene.findByName(newName)) return false;
-        captureState();
-        if (!scene.renameObject(oldName, newName)) return false;
-        if (primary == oldName) primary = newName;
-        for (std::string& name : selection) {
-            if (name == oldName) name = newName;
+        if (world.findChild(object->parentId(), newName) != sk::kInvalidId) {
+            return false;
         }
-        // Si el renombrado era el padre de otros, su nombre sigue a los
-        // hijos en la jerarquia.
-        for (sk::SceneObject& object : scene.objects()) {
-            if (object.parent == oldName) object.parent = newName;
-        }
-        place.renameTreeItem(oldName, newName);
+        undo.push(world, sk::makeRenameCommand(world, id, newName));
+        const sk::Instance* renamed = world.find(id);
+        const std::string finalName = renamed ? renamed->name() : newName;
+        place.renameTreeItem(id, finalName);
         saveScene();
-        SK_INFO("Part renombrado: %s -> %s", oldName.c_str(), newName.c_str());
-        if (const sk::SceneObject* object = scene.findByName(newName)) {
-            place.showObject(*object); // campo y selectedName_ al dia
-        }
+        if (renamed) place.showObject(*renamed); // campo al dia
         code.refreshProperties(); // "Asociado a" en CODE
+        SK_INFO("Part renombrado: %s -> %s", oldName.c_str(),
+                finalName.c_str());
         return true;
     };
 
@@ -208,16 +342,17 @@ int main(int argc, char** argv) {
         config.addRecent(folder);
         config.save();
         active = std::move(p);
-        scene.clear();
-        scene.loadFromFile(scenePath(active));
+        world.clear();
+        world.loadFromFile(scenePath(active)); // migra v1 -> v2 si hace falta
+        world.ensureStructure();               // garantiza la estructura base
         play.close();
-        undoStack.clear(); // cada proyecto parte con historia nueva
-        redoStack.clear();
+        undo.clear(); // cada proyecto parte con historia nueva
         // Raices de los grupos sinteticos del Explorer: scripts del
         // proyecto y biblioteca de assets.
         place.setScriptsRoot(sk::scripts::rootFolder(active));
         place.setAssetsRoot(active.folder + "/assets");
-        place.rebuildTree(scene.objects());  // Explorer con la jerarquia
+        place.setWorld(&world);
+        place.rebuildTree(world); // Explorer con la jerarquia
         view3d = true;
         panel.setVisible(false);
         workspace.setVisible(true);
@@ -230,6 +365,8 @@ int main(int argc, char** argv) {
         SetWindowTextA(static_cast<HWND>(window.nativeHandle()),
                        ("Motor SK - " + active.name).c_str());
         logProjection = true;
+        needsRedraw = true;
+        ++contentVersion; // reconstruir caches para el proyecto abierto
         SK_INFO("Proyecto abierto: %s", active.name.c_str());
     };
 
@@ -237,11 +374,12 @@ int main(int argc, char** argv) {
     // Cerrar, o Esc). Guarda la escena por si quedo alguna mutacion sin
     // persistir y limpia la seleccion para el siguiente proyecto.
     auto closeProject = [&]() {
-        saveScene();
+        writeSceneNow(); // guardado inmediato: se abandona el proyecto
         play.close();
         view3d = false;
         selection.clear();
-        primary.clear();
+        primary = sk::kInvalidId;
+        needsRedraw = true;
         panel.setVisible(true);
         panel.refresh();
         workspace.setVisible(false);
@@ -274,6 +412,7 @@ int main(int argc, char** argv) {
         window.destroy();
         return 1;
     }
+    place.setWorld(&world);
 
     // El panel Output de PLACE recibe copia de todos los SK_INFO/WARN/ERROR.
     sk::setLogSink([&place](sk::LogLevel level, const std::string& message) {
@@ -320,39 +459,28 @@ int main(int argc, char** argv) {
         workspace.setDocsActive(true);
     });
 
-    // Atajo "Part": anade el objeto a la escena y al Explorer (insertar
-    // lo selecciona, lo que refresca Properties via onSelectionChanged).
+    // Atajo "Part": anade el objeto al World bajo el Workspace y refresca
+    // el Explorer (insertar lo selecciona, lo que refresca Properties).
     workspace.setOnAddPart([&](int shape) {
         const sk::Shape s = (shape >= 0 && shape < static_cast<int>(sk::Shape::Count))
                                 ? static_cast<sk::Shape>(shape)
                                 : sk::Shape::Cube;
-        captureState();
-        const std::string name = scene.addPart(s).name;
-        place.addObject(name);
+        const sk::InstanceId parent = defaultParent();
+        if (parent == sk::kInvalidId) return;
+        undo.push(world, sk::makeCreateCommand(world, "Part", parent,
+                                               nextPartPos(),
+                                               static_cast<int>(s)));
+        sk::InstanceId created = sk::kInvalidId;
+        if (const sk::Instance* p = world.find(parent)) {
+            if (!p->children().empty()) created = p->children().back();
+        }
+        place.rebuildTree(world);
+        if (created != sk::kInvalidId) applySelection({created}, created);
         saveScene();
         logProjection = true;
-        SK_INFO("Part anadido: %s (%s)", name.c_str(), sk::shapeName(s));
+        SK_INFO("Part anadido: %s (%s)", worldName(created).c_str(),
+                sk::shapeName(s));
     });
-
-    // Pinta Properties + caret del Explorer tras cambiar la seleccion.
-    auto applySelection = [&](std::vector<std::string> names,
-                              const std::string& newPrimary) {
-        selection = std::move(names);
-        primary = newPrimary;
-        place.syncTreeSelection(primary);
-        if (selection.empty()) {
-            place.showNoSelection();
-        } else if (selection.size() == 1) {
-            const sk::SceneObject* object = scene.findByName(selection.front());
-            if (object) {
-                place.showObject(*object);
-            } else {
-                place.showNoSelection();
-            }
-        } else {
-            place.showMultiple(static_cast<int>(selection.size()));
-        }
-    };
 
     // Menu "Archivo" de la barra de menus: cada comando decide aqui. Los
     // tres dialogos informativos (configuracion, atajos, autosaves) son
@@ -365,12 +493,13 @@ int main(int argc, char** argv) {
             break;
         case sk::kFileSave:
             if (view3d) {
-                saveScene();
+                writeSceneNow();
                 SK_INFO("Escena guardada");
             }
             break;
         case sk::kFileSaveAs: {
             if (!view3d || active.folder.empty()) break;
+            writeSceneNow(); // la copia parte del estado actual en disco
             const std::string newName = sk::ui::promptText(
                 hwnd, "Guardar como", active.name.c_str());
             if (newName.empty() || newName == active.name) break;
@@ -381,7 +510,6 @@ int main(int argc, char** argv) {
                             "existe un proyecto con ese nombre.",
                             "Guardar como", MB_OK | MB_ICONWARNING);
             } else {
-                saveScene();
                 openProject(newFolder);
             }
             break;
@@ -405,53 +533,50 @@ int main(int argc, char** argv) {
             std::string prefix;
             if (id == sk::kFileImportAs) {
                 prefix = sk::ui::promptText(hwnd, "Importar como", "");
+                if (!prefix.empty()) prefix += " ";
             }
 
-            sk::Scene incoming;
+            sk::World incoming;
             if (!incoming.loadFromFile(ofn.lpstrFile)) {
                 SK_ERROR("Importar: no se pudo leer %s", ofn.lpstrFile);
                 break;
             }
-            if (incoming.objects().empty()) {
+            incoming.ensureStructure();
+            const std::vector<sk::InstanceId> inDims = incoming.dimensions();
+            const sk::InstanceId inWs =
+                inDims.empty()
+                    ? sk::kInvalidId
+                    : incoming.findChild(inDims.front(), sk::kWorkspaceName);
+
+            std::vector<sk::Instance> nodes;
+            std::vector<sk::InstanceId> newIds;
+            if (inWs != sk::kInvalidId) {
+                const sk::Instance* wsInst = incoming.find(inWs);
+                std::vector<sk::InstanceId> tops;
+                if (wsInst) tops = wsInst->children();
+                for (sk::InstanceId top : tops) {
+                    for (sk::InstanceId sid : incoming.subtree(top)) {
+                        if (const sk::Instance* o = incoming.find(sid)) {
+                            nodes.push_back(*o);
+                            newIds.push_back(world.allocateId());
+                        }
+                    }
+                }
+            }
+            if (nodes.empty()) {
                 SK_INFO("Importar: %s esta vacia", ofn.lpstrFile);
                 break;
             }
-            captureState();
-            std::vector<std::string> added;
-            std::map<std::string, std::string> nameMap;
-            // Primera pasada: copiar todos los objetos con nombre unico
-            // (y prefijo si viene de "Importar como").
-            for (const sk::SceneObject& src : incoming.objects()) {
-                sk::SceneObject& copy = scene.addCopy(src, sk::Vec3{});
-                const std::string base =
-                    prefix.empty() ? src.name : prefix + " " + src.name;
-                std::string name = base;
-                int n = 1;
-                while (scene.findByName(name)) {
-                    name = base + std::to_string(++n);
-                }
-                copy.name = name;
-                nameMap[src.name] = name;
-            }
-            // Segunda pasada: resolver los padres importados (el padre de
-            // un objeto fuera de la escena importada cae a la raiz).
-            for (const sk::SceneObject& src : incoming.objects()) {
-                sk::SceneObject* copy = scene.findByName(nameMap[src.name]);
-                if (!copy) continue;
-                auto parent = nameMap.find(src.parent);
-                copy->parent = src.parent.empty()
-                                   ? std::string()
-                                   : (parent != nameMap.end()
-                                          ? parent->second
-                                          : std::string());
-                place.addObject(copy->name, copy->parent);
-                added.push_back(copy->name);
-            }
+            std::vector<sk::InstanceId> roots;
+            undo.push(world, sk::makeInsertSubtreeCommand(
+                                 world, nodes, newIds, defaultParent(),
+                                 sk::Vec3{}, prefix, &roots));
+            place.rebuildTree(world);
+            if (!roots.empty()) applySelection(roots, roots.back());
             saveScene();
-            if (!added.empty()) applySelection(added, added.back());
             logProjection = true;
             SK_INFO("Importados %d objeto(s) de %s",
-                    static_cast<int>(added.size()), ofn.lpstrFile);
+                    static_cast<int>(nodes.size()), ofn.lpstrFile);
             break;
         }
         case sk::kFileEditorSettings:
@@ -499,129 +624,134 @@ int main(int argc, char** argv) {
     });
 
     // Cambio de herramienta (botones de la banda o teclas 1-4).
-    workspace.setOnToolChanged([](int tool) {
+    workspace.setOnToolChanged([&](int tool) {
+        needsRedraw = true;
+        ++contentVersion; // el gizmo (y su resaltado) cambia
         SK_INFO("herramienta: %s", kToolNames[tool]);
     });
 
-    // Seleccion en el Explorer -> Properties (objetos de la escena o la
-    // raiz dimension01). El estado de seleccion (multi) vive aqui y el
-    // arbol lo refleja.
-    place.setOnSelectionChanged([&](const std::string& name) {
-        const sk::SceneObject* object =
-            name.empty() ? nullptr : scene.findByName(name);
-        if (object) {
-            selection = {name};
-            primary = name;
-            place.showObject(*object);
-        } else {
-            selection.clear();
-            primary.clear();
-            place.showNoSelection();
-            if (!name.empty()) place.showRoot(); // raiz dimension01
+    // Seleccion en el Explorer -> Properties. El estado de seleccion (multi)
+    // vive aqui y el arbol lo refleja.
+    place.setOnSelectionChanged([&](sk::InstanceId id) {
+        if (id != sk::kInvalidId) {
+            if (const sk::Instance* object = world.find(id)) {
+                selection = {id};
+                primary = id;
+                place.showObject(*object);
+                return;
+            }
         }
+        selection.clear();
+        primary = sk::kInvalidId;
+        place.showNoSelection();
     });
 
     // Properties Transform editable: al perder el foco un campo se
     // aplica al objeto, se guarda la escena y se reescriben los campos
     // con el formato normalizado.
-    place.setOnTransformEdited([&](const std::string& name, int id,
+    place.setOnTransformEdited([&](sk::InstanceId id, int fieldId,
                                    float value) {
-        sk::SceneObject* object = scene.findByName(name);
+        sk::Instance* object = world.find(id);
         if (!object) return;
-        const int row = (id - 200) / 3;
-        const int axis = (id - 200) % 3;
+        const int row = (fieldId - 200) / 3;
+        const int axis = (fieldId - 200) % 3;
         static const char* kRows[] = {"position", "size", "orientation"};
         static const char* kAxes[] = {"x", "y", "z"};
-        sk::Vec3* target = &object->position;
-        if (row == 1) target = &object->scale;          // Size
-        else if (row == 2) target = &object->rotation;  // Orientation
+        sk::Vec3 p = object->position();
+        sk::Vec3 r = object->rotation();
+        sk::Vec3 s = object->scale();
+        sk::Vec3* target = &p;
+        if (row == 1) target = &s;          // Size
+        else if (row == 2) target = &r;     // Orientation
         if (std::fabs((&target->x)[axis] - value) < 1e-6f) {
             return; // sin cambio: no ensucia la historia ni guarda
         }
-        captureState();
         (&target->x)[axis] = value;
+        undo.push(world, sk::makeTransformCommand(world, id, p, r, s));
         saveScene();
-        place.showObject(*object);
-        SK_INFO("Properties %s: %s.%s = %.3g", name.c_str(), kRows[row],
+        if (const sk::Instance* o = world.find(id)) place.showObject(*o);
+        SK_INFO("Properties %s: %s.%s = %.3g", worldName(id).c_str(), kRows[row],
                 kAxes[axis], value);
     });
 
     // Properties Nombre editable: al perder el foco o con Enter se
-    // renombra el objeto en la escena, en el Explorer y en los paneles.
-    // Nombre duplicado/vacio lo rechaza la escena y el panel restaura
-    // el texto anterior.
-    place.setOnNameEdited([&](const std::string& oldName,
-                              const std::string& newName) {
-        return doRename(oldName, newName);
+    // renombra el objeto en el World, en el Explorer y en los paneles.
+    // Nombre duplicado/vacio lo rechaza y el panel restaura el anterior.
+    place.setOnNameEdited([&](sk::InstanceId id, const std::string& newName) {
+        return doRename(id, newName);
     });
 
     // Properties checkboxes (ids del panel: 400 CastShadow, 401 Locked,
     // 402 CanCollide, 403 Anchored): se aplican al objeto y se guarda.
-    place.setOnBoolEdited([&](const std::string& name, int id, bool value) {
-        sk::SceneObject* object = scene.findByName(name);
+    place.setOnBoolEdited([&](sk::InstanceId id, int fieldId, bool value) {
+        sk::Instance* object = world.find(id);
         if (!object) return;
-        bool* target = nullptr;
         const char* field = nullptr;
-        switch (id) {
-        case 400: target = &object->castShadow; field = "CastShadow"; break;
-        case 401: target = &object->locked; field = "Locked"; break;
-        case 402: target = &object->canCollide; field = "CanCollide"; break;
-        case 403: target = &object->anchored; field = "Anchored"; break;
+        bool def = false;
+        switch (fieldId) {
+        case 400: field = "CastShadow"; def = true; break;
+        case 401: field = "Locked"; def = false; break;
+        case 402: field = "CanCollide"; def = true; break;
+        case 403: field = "Anchored"; def = false; break;
         default: return;
         }
-        if (*target == value) {
+        if (object->propBool(field, def) == value) {
             return; // sin cambio: no ensucia la historia ni guarda
         }
-        captureState();
-        *target = value;
+        sk::PropertyValue pv;
+        pv.b = value;
+        undo.push(world, sk::makePropertyCommand(world, id, field, pv));
         saveScene();
-        SK_INFO("Properties %s: %s = %s", name.c_str(), field,
+        SK_INFO("Properties %s: %s = %s", worldName(id).c_str(), field,
                 value ? "true" : "false");
     });
 
     // Properties Reflectance (410) / Transparency (411): el panel ya
     // reclama el valor a 0..1; aqui se aplica y se reescriben los campos.
-    place.setOnFloatEdited([&](const std::string& name, int id, float value) {
-        sk::SceneObject* object = scene.findByName(name);
+    place.setOnFloatEdited([&](sk::InstanceId id, int fieldId, float value) {
+        sk::Instance* object = world.find(id);
         if (!object) return;
-        float* target = nullptr;
-        if (id == 410) target = &object->reflectance;
-        else if (id == 411) target = &object->transparency;
+        const char* field = nullptr;
+        if (fieldId == 410) field = "Reflectance";
+        else if (fieldId == 411) field = "Transparency";
         else return;
-        if (std::fabs(*target - value) < 1e-6f) {
+        if (std::fabs(object->propFloat(field) - value) < 1e-6f) {
             return; // sin cambio: no ensucia la historia ni guarda
         }
-        captureState();
-        *target = value;
+        sk::PropertyValue pv;
+        pv.f = value;
+        undo.push(world, sk::makePropertyCommand(world, id, field, pv));
         saveScene();
-        place.showObject(*object);
-        SK_INFO("Properties %s: %s = %.2f", name.c_str(),
-                id == 410 ? "Reflectance" : "Transparency", value);
+        if (const sk::Instance* o = world.find(id)) place.showObject(*o);
+        SK_INFO("Properties %s: %s = %.2f", worldName(id).c_str(), field, value);
     });
 
     // Properties Pivot (500..502 Position, 503..505 Orientation): mueve
     // el origen de la part sin tocar su position en el mundo.
-    place.setOnPivotEdited([&](const std::string& name, int id, float value) {
-        sk::SceneObject* object = scene.findByName(name);
+    place.setOnPivotEdited([&](sk::InstanceId id, int fieldId, float value) {
+        sk::Instance* object = world.find(id);
         if (!object) return;
-        const int idx = id - 500;
+        const int idx = fieldId - 500;
         if (idx < 0 || idx >= 6) return;
-        sk::Vec3* target =
-            idx < 3 ? &object->pivotPosition : &object->pivotRotation;
-        if (std::fabs((&target->x)[idx % 3] - value) < 1e-6f) {
+        const char* field = idx < 3 ? "PivotPosition" : "PivotRotation";
+        sk::Vec3 v = object->propVec3(field);
+        if (std::fabs((&v.x)[idx % 3] - value) < 1e-6f) {
             return; // sin cambio: no ensucia la historia ni guarda
         }
-        captureState();
-        (&target->x)[idx % 3] = value;
+        (&v.x)[idx % 3] = value;
+        sk::PropertyValue pv;
+        pv.v = v;
+        undo.push(world, sk::makePropertyCommand(world, id, field, pv));
         saveScene();
-        place.showObject(*object);
-        SK_INFO("Properties %s: pivot[%d] = %.3g", name.c_str(), idx, value);
+        if (const sk::Instance* o = world.find(id)) place.showObject(*o);
+        SK_INFO("Properties %s: pivot[%d] = %.3g", worldName(id).c_str(), idx,
+                value);
     });
 
     // Attributes: parsea "nombre | tipo | valor" por linea al objeto.
     place.setOnAttributesEdited(
-        [&](const std::string& name, const std::string& text) {
-            sk::SceneObject* object = scene.findByName(name);
+        [&](sk::InstanceId id, const std::string& text) {
+            sk::Instance* object = world.find(id);
             if (!object) return;
             std::vector<sk::Attribute> parsed;
             std::string line;
@@ -661,16 +791,38 @@ int main(int argc, char** argv) {
                 if (attr.type.empty()) attr.type = "text";
                 if (!attr.name.empty()) parsed.push_back(std::move(attr));
             }
-            if (parsed == object->attributes) return;
-            captureState();
-            object->attributes = std::move(parsed);
+            if (parsed == object->getAttributes()) return;
+            std::vector<sk::CommandPtr> parts;
+            for (const sk::Attribute& old : object->getAttributes()) {
+                bool still = false;
+                for (const sk::Attribute& n : parsed) {
+                    if (n.name == old.name) {
+                        still = true;
+                        break;
+                    }
+                }
+                if (!still) {
+                    parts.push_back(
+                        sk::makeAttributeCommand(world, id, old, true));
+                }
+            }
+            for (const sk::Attribute& n : parsed) {
+                const sk::Attribute prev = object->getAttribute(n.name);
+                const bool present = object->hasAttribute(n.name);
+                if (!present || !(prev == n)) {
+                    parts.push_back(
+                        sk::makeAttributeCommand(world, id, n, false));
+                }
+            }
+            if (parts.empty()) return;
+            undo.push(world, sk::makeCompoundCommand(std::move(parts)));
             saveScene();
-            SK_INFO("Attributes de %s actualizados", name.c_str());
+            SK_INFO("Attributes de %s actualizados", worldName(id).c_str());
         });
 
     // Tags: una etiqueta por linea.
-    place.setOnTagsEdited([&](const std::string& name, const std::string& text) {
-        sk::SceneObject* object = scene.findByName(name);
+    place.setOnTagsEdited([&](sk::InstanceId id, const std::string& text) {
+        sk::Instance* object = world.find(id);
         if (!object) return;
         std::vector<std::string> tags;
         std::string line;
@@ -682,36 +834,49 @@ int main(int argc, char** argv) {
             size_t b = line.find_last_not_of(" \t");
             tags.push_back(line.substr(a, b - a + 1));
         }
-        if (tags == object->tags) return;
-        captureState();
-        object->tags = std::move(tags);
+        if (tags == object->getTags()) return;
+        std::vector<sk::CommandPtr> parts;
+        for (const std::string& old : object->getTags()) {
+            if (std::find(tags.begin(), tags.end(), old) == tags.end()) {
+                parts.push_back(sk::makeTagCommand(world, id, old, false));
+            }
+        }
+        for (const std::string& t : tags) {
+            if (!object->hasTag(t)) {
+                parts.push_back(sk::makeTagCommand(world, id, t, true));
+            }
+        }
+        if (parts.empty()) return;
+        undo.push(world, sk::makeCompoundCommand(std::move(parts)));
         saveScene();
-        SK_INFO("Tags de %s actualizados", name.c_str());
+        SK_INFO("Tags de %s actualizados", worldName(id).c_str());
     });
 
     // Boton "+" del Explorer: inserta una clase bajo el nodo indicado.
-    place.setOnInsertClass([&](const std::string& parent,
+    place.setOnInsertClass([&](sk::InstanceId parentId,
                                const std::string& className) {
-        if (!scene.findByName(parent)) return;
-        captureState();
-        sk::SceneObject& created = scene.addNode(className, parent);
-        const std::string createdName = created.name;
-        saveScene();
-        place.rebuildTree(scene.objects());
-        selection = {createdName};
-        primary = createdName;
-        if (const sk::SceneObject* object = scene.findByName(createdName)) {
-            place.showObject(*object);
+        if (parentId == sk::kInvalidId || !world.exists(parentId)) return;
+        undo.push(world, sk::makeCreateCommand(world, className, parentId,
+                                               nextPartPos()));
+        sk::InstanceId created = sk::kInvalidId;
+        if (const sk::Instance* p = world.find(parentId)) {
+            if (!p->children().empty()) created = p->children().back();
         }
-        place.syncTreeSelection(createdName);
+        saveScene();
+        place.rebuildTree(world);
+        if (created != sk::kInvalidId) {
+            applySelection({created}, created);
+        }
         SK_INFO("Insertado %s \"%s\" en %s", className.c_str(),
-                createdName.c_str(), parent.c_str());
+                worldName(created).c_str(), worldName(parentId).c_str());
     });
 
     // CODE: el panel Properties consulta el objeto asociado a un script.
     code.setOnQueryAssoc([&](const std::string& rel) -> std::string {
-        for (const sk::SceneObject& object : scene.objects()) {
-            if (object.script == rel) return object.name;
+        for (sk::InstanceId id : allInstances()) {
+            const sk::Instance* o = world.find(id);
+            if (!o || !o->hasAttribute("Script")) continue;
+            if (o->getAttribute("Script").value == rel) return o->name();
         }
         return "";
     });
@@ -720,11 +885,12 @@ int main(int argc, char** argv) {
     // asociaciones de la escena que apuntaban a esa rel.
     code.setOnScriptRemoved([&](const std::string& rel) {
         bool changed = false;
-        for (sk::SceneObject& object : scene.objects()) {
-            if (object.script.empty()) continue;
-            if (object.script == rel ||
-                object.script.rfind(rel + "/", 0) == 0) {
-                object.script.clear();
+        for (sk::InstanceId id : allInstances()) {
+            sk::Instance* o = world.find(id);
+            if (!o || !o->hasAttribute("Script")) continue;
+            const std::string value = o->getAttribute("Script").value;
+            if (value == rel || value.rfind(rel + "/", 0) == 0) {
+                o->removeAttribute("Script");
                 changed = true;
             }
         }
@@ -735,12 +901,19 @@ int main(int argc, char** argv) {
     code.setOnScriptRenamed([&](const std::string& oldRel,
                                  const std::string& newRel) {
         bool changed = false;
-        for (sk::SceneObject& object : scene.objects()) {
-            if (object.script == oldRel) {
-                object.script = newRel;
+        for (sk::InstanceId id : allInstances()) {
+            sk::Instance* o = world.find(id);
+            if (!o || !o->hasAttribute("Script")) continue;
+            const std::string value = o->getAttribute("Script").value;
+            if (value == oldRel) {
+                sk::Attribute a = o->getAttribute("Script");
+                a.value = newRel;
+                o->setAttribute(a);
                 changed = true;
-            } else if (object.script.rfind(oldRel + "/", 0) == 0) {
-                object.script = newRel + object.script.substr(oldRel.size());
+            } else if (value.rfind(oldRel + "/", 0) == 0) {
+                sk::Attribute a = o->getAttribute("Script");
+                a.value = newRel + value.substr(oldRel.size());
+                o->setAttribute(a);
                 changed = true;
             }
         }
@@ -759,17 +932,17 @@ int main(int argc, char** argv) {
     // Stop la cierra. Requieren un proyecto abierto.
     workspace.setOnPlay([&]() {
         if (active.folder.empty()) return;
-        play.open(scene, camera, false);
+        play.open(world, camera, false);
     });
     workspace.setOnRun([&]() {
         if (active.folder.empty()) return;
-        play.open(scene, camera, true);
+        play.open(world, camera, true);
     });
     workspace.setOnStop([&]() { play.close(); });
 
     // Pruebas: si se pidio --play, abre la ventana de ejecucion ya.
     if (startupPlay && !active.folder.empty()) {
-        play.open(scene, camera, true);
+        play.open(world, camera, true);
     }
 
     const double startTime = nowSeconds();
@@ -779,9 +952,9 @@ int main(int argc, char** argv) {
     bool camKeysWasDown = false;
     int toolKeyWasDown = 0;
     bool deleteKeyWasDown = false;
-    // Portapapeles interno de Parts (Ctrl+C/X) y estado de flancos de los
-    // atajos de copia/pega/clonado/rotacion.
-    std::vector<sk::SceneObject> clipboard;
+    // Portapapeles interno de subarboles (Ctrl+C/X) y estado de flancos de
+    // los atajos de copia/pega/clonado/rotacion.
+    std::vector<std::vector<sk::Instance>> clipboard;
     bool clipboardFromCut = false;
     bool copyKeyWasDown = false;
     bool pasteKeyWasDown = false;
@@ -812,12 +985,12 @@ int main(int argc, char** argv) {
     // Gizmo de herramientas: arrastre activo + eje bajo el puntero.
     sk::GizmoDrag gizmoDrag;
 
-    // Arrastre de objeto: mantener pulsado el cuerpo de un parte (sin tocar
-    // un asa del gizmo) y arrastrarlo con el puntero. La caja del grupo
-    // se apoya en la cara del otro parte que esta bajo el puntero (o en
-    // el suelo Y=0 si no hay nada): ver scene/snapping.h.
+    // Arrastre de objeto: mantener pulsado el cuerpo de una parte (sin
+    // tocar un asa del gizmo) y arrastrarla con el puntero. La caja del
+    // grupo se apoya en la cara del otro parte bajo el puntero (o en el
+    // suelo Y=0 si no hay nada): ver scene/snapping.h.
     struct ObjDragStart {
-        std::string name;
+        sk::InstanceId id = sk::kInvalidId;
         sk::Vec3 pos;
         sk::Vec3 rot;
     };
@@ -826,13 +999,13 @@ int main(int argc, char** argv) {
     // Punto de agarre menos centro del lead al empezar (mundo): fija la
     // posicion del grupo respecto al puntero durante el arrastre.
     sk::Vec3 grabOffset{};
-    std::string pressHit; // objeto bajo el punto de presion (o vacio)
+    sk::InstanceId pressHit = sk::kInvalidId; // objeto bajo el punto de presion
     bool pressCtrl = false;
     // Cara bajo el puntero durante el arrastre: se registra una sola vez
-    // por destino para que las pruebas vean donde se apoya el parte sin
+    // por destino para que las pruebas vean donde se apoya la parte sin
     // repetir el log en cada frame.
     bool snapLogged = false;
-    std::string snapSurface;
+    sk::InstanceId snapSurface = sk::kInvalidId;
     sk::Vec3 snapNormal{};
     int hoverAxis = -1;
     // Registro "gizmo eje X punta (x,y)": una sola vez por punta, para
@@ -841,13 +1014,13 @@ int main(int argc, char** argv) {
     int lastHoverAxis = -1;
     int lastHoverTx = -1;
     int lastHoverTy = -1;
-    std::string lastHoverPrimary;
+    sk::InstanceId lastHoverPrimary = sk::kInvalidId;
     bool cursorForced = false;
     // Puntas de los ejes logeadas al cambiar de herramienta o de
     // seleccion (y tras cada arrastre): las pruebas leen de aqui donde
     // poner el puntero sin tener que barrer el viewport.
     int lastTipsTool = -1;
-    std::string lastTipsPrimary;
+    sk::InstanceId lastTipsPrimary = sk::kInvalidId;
     auto inViewport = [&](const sk::Vec2& p) {
         if (!view3d || !place.visible()) return false;
         const float x0 = static_cast<float>(sk::PlaceView::kPropertiesWidth);
@@ -857,101 +1030,68 @@ int main(int argc, char** argv) {
         return p.x >= x0 && p.x <= x1 && p.y >= y0 &&
                p.y <= static_cast<float>(window.framebufferHeight());
     };
-// Vuelve a construir el Explorer tras deshacer/rehacer o re-agrupar:
-// las Parts pueden haber cambiado de nombre, forma o jerarquia.
-auto rebuildExplorer = [&]() {
-    place.rebuildTree(scene.objects());
-};
 
-// Nombres de un objeto y de todos sus descendientes (para borrar o
-// cortar: quitar un padre se lleva su jerarquia detras).
-auto collectSubtree = [&](const std::string& name) {
-    std::vector<std::string> out{name};
-    for (size_t i = 0; i < out.size(); ++i) {
-        for (const sk::SceneObject& object : scene.objects()) {
-            if (object.parent == out[i] &&
-                std::find(out.begin(), out.end(), object.name) == out.end()) {
-                out.push_back(object.name);
-            }
+    // Re-agrupar desde el Explorer: suelta X sobre Y y Y queda dentro de X
+    // (o el grupo Dimensions = la dimension raiz). Valida que el padre
+    // exista, que no sea el propio hijo y que no se formen ciclos.
+    place.setOnReparent([&](sk::InstanceId child, sk::InstanceId parent) {
+        if (!view3d || child == sk::kInvalidId) return;
+        const sk::Instance* object = world.find(child);
+        if (!object) return;
+        if (parent == sk::kInvalidId) {
+            const std::vector<sk::InstanceId> dims = world.dimensions();
+            if (dims.empty()) return;
+            parent = dims.front();
         }
-    }
-    return out;
-};
-auto collectAll = [&](const std::vector<std::string>& names) {
-    std::vector<std::string> out;
-    for (const std::string& name : names) {
-        for (const std::string& sub : collectSubtree(name)) {
-            if (std::find(out.begin(), out.end(), sub) == out.end()) {
-                out.push_back(sub);
-            }
+        if (child == parent) return;
+        if (!world.exists(parent)) return;
+        if (object->parentId() == parent) return;
+        // Ciclo: el nuevo padre no puede ser descendiente del hijo.
+        for (sk::InstanceId s : world.subtree(child)) {
+            if (s == parent) return;
         }
-    }
-    return out;
-};
+        undo.push(world, sk::makeReparentCommand(world, child, parent));
+        saveScene();
+        place.rebuildTree(world);
+        applySelection({child}, child);
+        logProjection = true;
+        SK_INFO("Explorer: %s cuelga de %s", worldName(child).c_str(),
+                worldName(parent).c_str());
+    });
 
-// Re-agrupar desde el Explorer: suelta X sobre Y y Y queda dentro de X
-// (o vacio = vuelve a la raiz dimension01). Valida que el padre exista,
-// que no sea el propio hijo y que no se formen ciclos.
-place.setOnReparent([&](const std::string& child,
-                        const std::string& parent) {
-    if (!view3d || child.empty()) return;
-    sk::SceneObject* object = scene.findByName(child);
-    if (!object) return;
-    const std::string newParent = parent;
-    if (child == newParent) return;
-    if (!newParent.empty() && !scene.findByName(newParent)) return;
-    if (object->parent == newParent) return;
-    // Ciclo: el nuevo padre no puede ser descendiente del hijo.
-    std::string up = newParent;
-    while (!up.empty()) {
-        if (up == child) return;
-        const sk::SceneObject* node = scene.findByName(up);
-        up = node ? node->parent : std::string();
-    }
-    captureState();
-    object->parent = newParent;
-    saveScene();
-    rebuildExplorer();
-    applySelection({child}, child);
-    logProjection = true;
-    SK_INFO("Explorer: %s cuelga de %s", child.c_str(),
-            newParent.empty() ? "la raiz" : newParent.c_str());
-});
-
-    // Aplica un snapshot: sustituye el contenido de la escena, deja la
-    // seleccion en los nombres que siguen existiendo, pinta Properties y
-    // guarda el archivo para que el estado en disco siga al editor.
-    auto restoreState = [&](const SceneSnapshot& state) {
-        scene.objects() = state.objects;
-        std::vector<std::string> names;
-        for (const std::string& name : state.selection) {
-            if (scene.findByName(name)) names.push_back(name);
+    // Deshacer/rehacer: aplica el comando, poda la seleccion a los ids que
+    // siguen existiendo y refresca el Explorer y los paneles.
+    auto doUndo = [&]() {
+        if (!undo.canUndo()) return;
+        undo.undo(world);
+        std::vector<sk::InstanceId> ids;
+        for (sk::InstanceId id : selection) {
+            if (world.exists(id)) ids.push_back(id);
         }
-        std::string newPrimary = state.primary;
-        if (!newPrimary.empty() && !scene.findByName(newPrimary)) {
-            newPrimary = names.empty() ? std::string() : names.front();
-        }
-        rebuildExplorer();
-        applySelection(std::move(names), newPrimary);
+        sk::InstanceId newPrimary =
+            world.exists(primary) ? primary
+                                  : (ids.empty() ? sk::kInvalidId : ids.front());
+        place.rebuildTree(world);
+        applySelection(std::move(ids), newPrimary);
         saveScene();
         logProjection = true;
-    };
-
-    auto doUndo = [&]() {
-        if (undoStack.empty()) return;
-        redoStack.push_back({scene.objects(), selection, primary});
-        SceneSnapshot state = std::move(undoStack.back());
-        undoStack.pop_back();
-        restoreState(state);
         SK_INFO("undo");
     };
 
     auto doRedo = [&]() {
-        if (redoStack.empty()) return;
-        undoStack.push_back({scene.objects(), selection, primary});
-        SceneSnapshot state = std::move(redoStack.back());
-        redoStack.pop_back();
-        restoreState(state);
+        if (!undo.canRedo()) return;
+        undo.redo(world);
+        std::vector<sk::InstanceId> ids;
+        for (sk::InstanceId id : selection) {
+            if (world.exists(id)) ids.push_back(id);
+        }
+        sk::InstanceId newPrimary =
+            world.exists(primary) ? primary
+                                  : (ids.empty() ? sk::kInvalidId : ids.front());
+        place.rebuildTree(world);
+        applySelection(std::move(ids), newPrimary);
+        saveScene();
+        logProjection = true;
         SK_INFO("redo");
     };
 
@@ -964,22 +1104,33 @@ place.setOnReparent([&](const std::string& child,
             place.resize(window.framebufferWidth(), window.framebufferHeight());
             code.resize(window.framebufferWidth(), window.framebufferHeight());
             docs.resize(window.framebufferWidth(), window.framebufferHeight());
+            needsRedraw = true;
+        }
+        // Restaurado/descubierto (WM_PAINT): repinta el viewport.
+        if (window.consumeRepaintRequested()) {
+            needsRedraw = true;
         }
 
         if (!view3d) {
             // Menu: solo se procesan mensajes (los controles Win32 pintan
             // encima; el renderer no se llama hasta abrir un proyecto).
+            // En reposo el hilo duerme sin gastar CPU.
             ++frame;
-            Sleep(15);
+            if (maxFrames >= 0) {
+                Sleep(1); // modo test: no bloquear para llegar a --frames
+            } else {
+                window.waitEvents(INFINITE);
+            }
             continue;
         }
 
         // Esc: cancela el arrastre del gizmo si esta en curso; si no, el
-        // del marquee; si no, vuelve al panel de proyectos. Solo con la
-        // ventana enfocada (keyDown usa GetAsyncKeyState, que es global).
+        // del objeto; si no, el marquee; si no, vuelve al panel de
+        // proyectos. Solo con la ventana enfocada (keyDown usa
+        // GetAsyncKeyState, que es global).
         const bool escDown = window.keyDown(VK_ESCAPE) && window.hasFocus();
         if (escDown && !escWasDown && gizmoDrag.active) {
-            sk::gizmoRevert(gizmoDrag, scene);
+            sk::gizmoRevert(gizmoDrag, world);
             gizmoDrag.active = false;
             lastTipsTool = -1; // las puntas vuelven a su sitio
             SK_INFO("gizmo cancelado");
@@ -989,9 +1140,10 @@ place.setOnReparent([&](const std::string& child,
             // (posicion y rotacion: el snap de superficie puede haber
             // girado el grupo).
             for (const ObjDragStart& start : objDragStart) {
-                if (sk::SceneObject* object = scene.findByName(start.name)) {
-                    object->position = start.pos;
-                    object->rotation = start.rot;
+                if (sk::Instance* object = world.find(start.id)) {
+                    object->setPosition(start.pos);
+                    object->setRotation(start.rot);
+                    world.markChanged(start.id);
                 }
             }
             objDragActive = false;
@@ -1015,7 +1167,19 @@ place.setOnReparent([&](const std::string& child,
         lastTime = now;
         if (dt > 0.1f) dt = 0.1f; // proteccion contra picos (ventana arrastrada)
 
+        const sk::Mat4 viewBefore = camera.view();
         camera.update(dt, window);
+        // Si la camara cambio (WASD, giro con clic derecho, rueda), repinta.
+        {
+            const float* a = viewBefore.m;
+            const float* b = camera.view().m;
+            for (int i = 0; i < 16; ++i) {
+                if (std::fabs(a[i] - b[i]) > 1e-6f) {
+                    needsRedraw = true;
+                    break;
+                }
+            }
+        }
 
         // Log al empezar a mover la camara (mismo criterio de foco que
         // Camera::update): las pruebas comprueban que WASD/Q/E no
@@ -1057,16 +1221,23 @@ place.setOnReparent([&](const std::string& child,
             !objDragActive &&
             (window.keyDown(VK_DELETE) || window.keyDown(VK_BACK));
         if (delKeyDown && !deleteKeyWasDown && !selection.empty()) {
-            captureState();
             // Borrar un padre se lleva a sus descendientes detras.
-            const std::vector<std::string> removed = collectAll(selection);
-            for (const std::string& name : removed) {
-                scene.removeObject(name);
-                place.removeTreeItem(name);
+            const std::vector<sk::InstanceId> tops = topLevelSelection();
+            int count = 0;
+            for (sk::InstanceId id : tops) {
+                count += static_cast<int>(world.subtree(id).size());
             }
-            applySelection({}, "");
-            saveScene();
-            SK_INFO("Eliminados %d objetos", static_cast<int>(removed.size()));
+            if (!tops.empty()) {
+                std::vector<sk::CommandPtr> parts;
+                for (sk::InstanceId id : tops) {
+                    parts.push_back(sk::makeRemoveCommand(world, id));
+                }
+                undo.push(world, sk::makeCompoundCommand(std::move(parts)));
+                applySelection({}, sk::kInvalidId);
+                place.rebuildTree(world);
+                saveScene();
+                SK_INFO("Eliminados %d objetos", count);
+            }
         }
         deleteKeyWasDown = delKeyDown;
 
@@ -1090,142 +1261,168 @@ place.setOnReparent([&](const std::string& child,
                             workspace.visible() && place.visible() &&
                             !gizmoDrag.active && !objDragActive;
 
-            // Copiar (Ctrl+C): la seleccion va al portapapeles interno.
+            // Copiar (Ctrl+C): los subarboles seleccionados al portapapeles.
             const bool copyDown = ok && ctrlDown && window.keyDown('C');
             if (edge(copyDown, copyKeyWasDown) && !selection.empty()) {
                 clipboard.clear();
-                for (const std::string& name : selection) {
-                    if (const sk::SceneObject* object = scene.findByName(name)) {
-                        clipboard.push_back(*object);
-                    }
+                for (sk::InstanceId id : topLevelSelection()) {
+                    clipboard.push_back(captureNodes(id));
                 }
                 clipboardFromCut = false;
-                SK_INFO("Copiados %d objeto(s)", static_cast<int>(clipboard.size()));
+                SK_INFO("Copiados %d objeto(s)",
+                        static_cast<int>(clipboard.size()));
             }
 
             // Cortar (Ctrl+X): copia y borra; el pegado posterior va al raton.
             const bool cutDown = ok && ctrlDown && window.keyDown('X');
             if (edge(cutDown, cutKeyWasDown) && !selection.empty()) {
-                captureState();
-                const std::vector<std::string> removed = collectAll(selection);
-                clipboard.clear();
-                for (const std::string& name : removed) {
-                    if (const sk::SceneObject* o = scene.findByName(name)) {
-                        clipboard.push_back(*o);
+                const std::vector<sk::InstanceId> tops = topLevelSelection();
+                if (!tops.empty()) {
+                    clipboard.clear();
+                    for (sk::InstanceId id : tops) {
+                        clipboard.push_back(captureNodes(id));
                     }
+                    clipboardFromCut = true;
+                    std::vector<sk::CommandPtr> parts;
+                    for (sk::InstanceId id : tops) {
+                        parts.push_back(sk::makeRemoveCommand(world, id));
+                    }
+                    undo.push(world, sk::makeCompoundCommand(std::move(parts)));
+                    applySelection({}, sk::kInvalidId);
+                    place.rebuildTree(world);
+                    saveScene();
+                    SK_INFO("Cortados %d objeto(s)",
+                            static_cast<int>(clipboard.size()));
                 }
-                clipboardFromCut = true;
-                for (const std::string& name : removed) {
-                    scene.removeObject(name);
-                    place.removeTreeItem(name);
-                }
-                applySelection({}, "");
-                saveScene();
-                SK_INFO("Cortados %d objeto(s)",
-                        static_cast<int>(removed.size()));
             }
 
             // Pegar (Ctrl+V): si vino de copiar, encima del original; si
-            // vino de cortar, bajo el puntero.
+            // vino de cortar, bajo el puntero (mismo padre, desplazado).
             const bool pasteDown = ok && ctrlDown && window.keyDown('V');
             if (edge(pasteDown, pasteKeyWasDown) && !clipboard.empty()) {
-                captureState();
                 sk::Vec3 mouseOffset{};
-                if (clipboardFromCut) {
-                    const float planeY = clipboard.front().position.y;
+                if (clipboardFromCut && !clipboard.front().empty()) {
+                    const float planeY = clipboard.front().front().position().y;
                     const sk::Ray ray = sk::rayFromCamera(
                         camera, aspect, 60.0f, window.mousePos(), vpW, vpH);
                     if (std::fabs(ray.dir.y) > 1e-6f) {
                         const float t = (planeY - ray.origin.y) / ray.dir.y;
                         if (t > 0.0f) {
                             const sk::Vec3 hit = ray.origin + ray.dir * t;
-                            mouseOffset = {hit.x - clipboard.front().position.x,
-                                           0.0f,
-                                           hit.z - clipboard.front().position.z};
+                            mouseOffset = {
+                                hit.x - clipboard.front().front().position().x,
+                                0.0f,
+                                hit.z - clipboard.front().front().position().z};
                         }
                     }
                 }
-                std::vector<std::string> newNames;
-                // Primera pasada: copiar los objetos (nombres unicos) y
-                // recordar la correspondencia viejo->nuevo de cada uno.
-                std::map<std::string, std::string> nameMap;
-                for (const sk::SceneObject& src : clipboard) {
-                    const sk::Vec3 off = clipboardFromCut
-                                             ? mouseOffset
-                                             : sk::Vec3{0.0f, 1.0f, 0.0f};
-                    sk::SceneObject& copy = scene.addCopy(src, off);
-                    nameMap[src.name] = copy.name;
-                }
-                // Segunda pasada: si el original colgaba de otro objeto
-                // copiado, la copia cuelga de la copia de su padre.
-                for (const sk::SceneObject& src : clipboard) {
-                    sk::SceneObject* copy = scene.findByName(nameMap[src.name]);
-                    if (!copy) continue;
-                    if (!src.parent.empty()) {
-                        auto it = nameMap.find(src.parent);
-                        copy->parent =
-                            it != nameMap.end()
-                                ? it->second
-                                : (scene.findByName(src.parent) ? src.parent
-                                                                : "");
-                    } else {
-                        copy->parent.clear();
+                // Ids padre de las raices del portapapeles: si todas
+                // comparten padre y sigue existiendo, se pega ahi.
+                sk::InstanceId sharedParent = sk::kInvalidId;
+                bool sameParent = true;
+                for (size_t i = 0; i < clipboard.size(); ++i) {
+                    if (clipboard[i].empty()) continue;
+                    const sk::InstanceId p = clipboard[i].front().parentId();
+                    if (i == 0 || sharedParent == sk::kInvalidId) {
+                        sharedParent = p;
+                    } else if (p != sharedParent) {
+                        sameParent = false;
                     }
-                    place.addObject(copy->name, copy->parent);
-                    newNames.push_back(copy->name);
                 }
-                if (!newNames.empty()) {
-                    applySelection(newNames, newNames.back());
+                const sk::InstanceId target =
+                    (sameParent && world.exists(sharedParent))
+                        ? sharedParent
+                        : defaultParent();
+                const sk::Vec3 off = clipboardFromCut
+                                         ? mouseOffset
+                                         : sk::Vec3{0.0f, 1.0f, 0.0f};
+                std::vector<sk::Instance> nodes;
+                std::vector<sk::InstanceId> newIds;
+                for (const std::vector<sk::Instance>& subtree : clipboard) {
+                    for (const sk::Instance& n : subtree) {
+                        nodes.push_back(n);
+                        newIds.push_back(world.allocateId());
+                    }
+                }
+                if (!nodes.empty()) {
+                    std::vector<sk::InstanceId> roots;
+                    undo.push(world, sk::makeInsertSubtreeCommand(
+                                         world, nodes, newIds, target, off, "",
+                                         &roots));
+                    place.rebuildTree(world);
+                    if (!roots.empty()) {
+                        applySelection(roots, roots.back());
+                    }
                     saveScene();
-                    SK_INFO("Pegados %d objeto(s)", static_cast<int>(newNames.size()));
+                    SK_INFO("Pegados %d objeto(s)",
+                            static_cast<int>(roots.size()));
                 }
             }
 
             // Clonar en el sitio (Ctrl+D).
             const bool dupDown = ok && ctrlDown && window.keyDown('D');
             if (edge(dupDown, dupKeyWasDown) && !selection.empty()) {
-                captureState();
-                const std::vector<std::string> src = selection;
-                std::vector<std::string> newNames;
-                for (const std::string& name : src) {
-                    const sk::SceneObject* object = scene.findByName(name);
+                std::vector<sk::CommandPtr> parts;
+                std::vector<sk::InstanceId> newRoots;
+                for (sk::InstanceId id : selection) {
+                    const sk::Instance* object = world.find(id);
                     if (!object) continue;
-                    sk::SceneObject& copy = scene.addCopy(*object, sk::Vec3{});
-                    // El clon cuelga del mismo padre que el original.
-                    place.addObject(copy.name, copy.parent);
-                    newNames.push_back(copy.name);
+                    sk::InstanceId root = sk::kInvalidId;
+                    parts.push_back(sk::makeCloneCommand(
+                        world, id, object->parentId(), sk::Vec3{}, &root));
+                    if (root != sk::kInvalidId) newRoots.push_back(root);
                 }
-                if (!newNames.empty()) {
-                    applySelection(newNames, newNames.back());
+                if (!parts.empty()) {
+                    undo.push(world,
+                              sk::makeCompoundCommand(std::move(parts)));
+                    place.rebuildTree(world);
+                    applySelection(newRoots,
+                                   newRoots.empty() ? sk::kInvalidId
+                                                    : newRoots.back());
                     saveScene();
-                    SK_INFO("Clonados %d objeto(s)", static_cast<int>(newNames.size()));
+                    SK_INFO("Clonados %d objeto(s)",
+                            static_cast<int>(newRoots.size()));
                 }
             }
 
             // Rotar 90 grados: Ctrl+R en Y, Ctrl+T en X.
             const bool rotYDown = ok && ctrlDown && window.keyDown('R');
             if (edge(rotYDown, rotYKeyWasDown) && !selection.empty()) {
-                captureState();
-                for (const std::string& name : selection) {
-                    if (sk::SceneObject* object = scene.findByName(name)) {
-                        object->rotation.y += 90.0f;
-                    }
+                std::vector<sk::CommandPtr> parts;
+                for (sk::InstanceId id : selection) {
+                    const sk::Instance* object = world.find(id);
+                    if (!object) continue;
+                    sk::Vec3 r = object->rotation();
+                    r.y += 90.0f;
+                    parts.push_back(sk::makeTransformCommand(
+                        world, id, object->position(), r, object->scale()));
                 }
-                saveScene();
-                applySelection(selection, primary);
-                SK_INFO("Rotado +90 en Y");
+                if (!parts.empty()) {
+                    undo.push(world,
+                              sk::makeCompoundCommand(std::move(parts)));
+                    saveScene();
+                    applySelection(selection, primary);
+                    SK_INFO("Rotado +90 en Y");
+                }
             }
             const bool rotXDown = ok && ctrlDown && window.keyDown('T');
             if (edge(rotXDown, rotXKeyWasDown) && !selection.empty()) {
-                captureState();
-                for (const std::string& name : selection) {
-                    if (sk::SceneObject* object = scene.findByName(name)) {
-                        object->rotation.x += 90.0f;
-                    }
+                std::vector<sk::CommandPtr> parts;
+                for (sk::InstanceId id : selection) {
+                    const sk::Instance* object = world.find(id);
+                    if (!object) continue;
+                    sk::Vec3 r = object->rotation();
+                    r.x += 90.0f;
+                    parts.push_back(sk::makeTransformCommand(
+                        world, id, object->position(), r, object->scale()));
                 }
-                saveScene();
-                applySelection(selection, primary);
-                SK_INFO("Rotado +90 en X");
+                if (!parts.empty()) {
+                    undo.push(world,
+                              sk::makeCompoundCommand(std::move(parts)));
+                    saveScene();
+                    applySelection(selection, primary);
+                    SK_INFO("Rotado +90 en X");
+                }
             }
         }
 
@@ -1249,14 +1446,14 @@ place.setOnReparent([&](const std::string& child,
 
                 // F12: renombrar la parte activa con un dialogo de texto.
                 if (edge(window.keyDown(VK_F12), f12KeyWasDown) &&
-                    !primary.empty()) {
-                    const sk::SceneObject* object = scene.findByName(primary);
+                    primary != sk::kInvalidId) {
+                    const sk::Instance* object = world.find(primary);
                     if (object) {
                         const std::string newName = sk::ui::promptText(
                             static_cast<HWND>(window.nativeHandle()),
-                            "Renombrar Parte", object->name.c_str());
+                            "Renombrar Parte", object->name().c_str());
                         if (!newName.empty()) {
-                            doRename(object->name, newName);
+                            doRename(primary, newName);
                         }
                     }
                 }
@@ -1267,17 +1464,16 @@ place.setOnReparent([&](const std::string& child,
                     sk::Vec3 minV{1e30f, 1e30f, 1e30f};
                     sk::Vec3 maxV{-1e30f, -1e30f, -1e30f};
                     bool any = false;
-                    for (const std::string& name : selection) {
-                        const sk::SceneObject* object = scene.findByName(name);
+                    for (sk::InstanceId id : selection) {
+                        const sk::Instance* object = world.find(id);
                         if (!object) continue;
                         any = true;
+                        const sk::Vec3 pos = object->position();
+                        const sk::Vec3 scale = object->scale();
                         for (int a = 0; a < 3; ++a) {
-                            const float half =
-                                std::fabs((&object->scale.x)[a]) * 0.5f;
-                            const float lo =
-                                (&object->position.x)[a] - half;
-                            const float hi =
-                                (&object->position.x)[a] + half;
+                            const float half = std::fabs((&scale.x)[a]) * 0.5f;
+                            const float lo = (&pos.x)[a] - half;
+                            const float hi = (&pos.x)[a] + half;
                             (&minV.x)[a] = std::fmin((&minV.x)[a], lo);
                             (&maxV.x)[a] = std::fmax((&maxV.x)[a], hi);
                         }
@@ -1295,10 +1491,9 @@ place.setOnReparent([&](const std::string& child,
                 // F1: abre la Referencia de clases en la clase del objeto
                 // activo (o "Part" si no hay seleccion).
                 if (edge(window.keyDown(VK_F1), f1KeyWasDown)) {
-                    const sk::SceneObject* object =
-                        primary.empty() ? nullptr : scene.findByName(primary);
+                    const sk::Instance* object = world.find(primary);
                     const std::string className =
-                        object ? object->className : std::string("Part");
+                        object ? object->className() : std::string("Part");
                     place.setVisible(false);
                     code.setVisible(false);
                     docs.setVisible(true);
@@ -1309,29 +1504,30 @@ place.setOnReparent([&](const std::string& child,
 
                 // Ctrl+G: agrupa la seleccion bajo un Model nuevo.
                 const bool groupDown = ctrlDown && window.keyDown('G');
-                if (edge(groupDown, groupKeyWasDown) &&
-                    !selection.empty()) {
-                    std::string parent;
-                    if (const sk::SceneObject* first =
-                            scene.findByName(selection.front())) {
-                        parent = first->parent;
+                if (edge(groupDown, groupKeyWasDown) && !selection.empty()) {
+                    std::vector<sk::InstanceId> members;
+                    for (sk::InstanceId id : selection) {
+                        if (!world.isProtected(id)) members.push_back(id);
                     }
-                    if (parent.empty()) parent = sk::kWorkspaceName;
-                    captureState();
-                    const std::string modelName =
-                        scene.addNode("Model", parent).name;
-                    for (const std::string& name : selection) {
-                        sk::SceneObject* object = scene.findByName(name);
-                        if (!object || object->protectedNode) continue;
-                        if (object->name == modelName) continue;
-                        object->parent = modelName;
+                    if (!members.empty()) {
+                        sk::InstanceId parent = sk::kInvalidId;
+                        if (const sk::Instance* first =
+                                world.find(members.front())) {
+                            parent = first->parentId();
+                        }
+                        if (parent == sk::kInvalidId) parent = defaultParent();
+                        sk::InstanceId groupId = sk::kInvalidId;
+                        undo.push(world, sk::makeGroupCommand(
+                                             world, parent, members,
+                                             &groupId));
+                        saveScene();
+                        place.rebuildTree(world);
+                        applySelection({groupId}, groupId);
+                        logProjection = true;
+                        SK_INFO("Grupo %s con %d objeto(s)",
+                                worldName(groupId).c_str(),
+                                static_cast<int>(members.size()));
                     }
-                    saveScene();
-                    place.rebuildTree(scene.objects());
-                    applySelection({modelName}, modelName);
-                    logProjection = true;
-                    SK_INFO("Grupo %s con %d objeto(s)", modelName.c_str(),
-                            static_cast<int>(selection.size()));
                 }
 
                 // Ctrl+U: desagrupa los Model/Folder seleccionados (sus
@@ -1339,54 +1535,48 @@ place.setOnReparent([&](const std::string& child,
                 const bool ungroupDown = ctrlDown && window.keyDown('U');
                 if (edge(ungroupDown, ungroupKeyWasDown) &&
                     !selection.empty()) {
-                    bool changed = false;
-                    std::vector<std::string> toRemove;
-                    for (const std::string& name : selection) {
-                        const sk::SceneObject* object = scene.findByName(name);
-                        if (!object || object->protectedNode) continue;
-                        if (object->className != "Model" &&
-                            object->className != "Folder") {
+                    std::vector<sk::CommandPtr> parts;
+                    std::vector<sk::InstanceId> groups;
+                    for (sk::InstanceId id : selection) {
+                        const sk::Instance* object = world.find(id);
+                        if (!object || world.isProtected(id)) continue;
+                        if (object->className() != "Model" &&
+                            object->className() != "Folder") {
                             continue;
                         }
-                        changed = true;
-                        for (sk::SceneObject& child : scene.objects()) {
-                            if (child.parent == name) child.parent = object->parent;
-                        }
-                        toRemove.push_back(name);
+                        groups.push_back(id);
+                        parts.push_back(sk::makeUngroupCommand(world, id));
                     }
-                    if (changed) {
-                        captureState();
-                        for (const std::string& name : toRemove) {
-                            scene.removeObject(name);
-                        }
+                    if (!parts.empty()) {
+                        undo.push(world,
+                                  sk::makeCompoundCommand(std::move(parts)));
                         saveScene();
-                        place.rebuildTree(scene.objects());
-                        applySelection({}, "");
+                        place.rebuildTree(world);
+                        applySelection({}, sk::kInvalidId);
                         logProjection = true;
                         SK_INFO("Desagrupado %d contenedor(es)",
-                                static_cast<int>(toRemove.size()));
+                                static_cast<int>(groups.size()));
                     }
                 }
 
                 // Ctrl+L: bloquea/desbloquea (Data.Locked) la seleccion.
                 const bool lockDown = ctrlDown && window.keyDown('L');
                 if (edge(lockDown, lockKeyWasDown) && !selection.empty()) {
-                    bool any = false;
-                    for (const std::string& name : selection) {
-                        if (const sk::SceneObject* o = scene.findByName(name)) {
-                            if (!o->protectedNode) any = true;
-                        }
+                    std::vector<sk::CommandPtr> parts;
+                    for (sk::InstanceId id : selection) {
+                        const sk::Instance* o = world.find(id);
+                        if (!o || world.isProtected(id)) continue;
+                        sk::PropertyValue pv;
+                        pv.b = !o->propBool("Locked", false);
+                        parts.push_back(
+                            sk::makePropertyCommand(world, id, "Locked", pv));
                     }
-                    if (any) {
-                        captureState();
-                        for (const std::string& name : selection) {
-                            sk::SceneObject* o = scene.findByName(name);
-                            if (o && !o->protectedNode) o->locked = !o->locked;
-                        }
+                    if (!parts.empty()) {
+                        undo.push(world,
+                                  sk::makeCompoundCommand(std::move(parts)));
                         saveScene();
-                        const sk::SceneObject* o =
-                            scene.findByName(selection.front());
-                        if (o) place.showObject(*o);
+                        if (const sk::Instance* o = world.find(selection.front()))
+                            place.showObject(*o);
                         SK_INFO("Bloqueado: %d objeto(s)",
                                 static_cast<int>(selection.size()));
                     }
@@ -1396,22 +1586,21 @@ place.setOnReparent([&](const std::string& child,
                 const bool altDown = (GetKeyState(VK_MENU) & 0x8000) != 0;
                 const bool anchorDown = altDown && window.keyDown('A');
                 if (edge(anchorDown, anchorKeyWasDown) && !selection.empty()) {
-                    bool any = false;
-                    for (const std::string& name : selection) {
-                        if (const sk::SceneObject* o = scene.findByName(name)) {
-                            if (!o->protectedNode) any = true;
-                        }
+                    std::vector<sk::CommandPtr> parts;
+                    for (sk::InstanceId id : selection) {
+                        const sk::Instance* o = world.find(id);
+                        if (!o || world.isProtected(id)) continue;
+                        sk::PropertyValue pv;
+                        pv.b = !o->propBool("Anchored", false);
+                        parts.push_back(
+                            sk::makePropertyCommand(world, id, "Anchored", pv));
                     }
-                    if (any) {
-                        captureState();
-                        for (const std::string& name : selection) {
-                            sk::SceneObject* o = scene.findByName(name);
-                            if (o && !o->protectedNode) o->anchored = !o->anchored;
-                        }
+                    if (!parts.empty()) {
+                        undo.push(world,
+                                  sk::makeCompoundCommand(std::move(parts)));
                         saveScene();
-                        const sk::SceneObject* o =
-                            scene.findByName(selection.front());
-                        if (o) place.showObject(*o);
+                        if (const sk::Instance* o = world.find(selection.front()))
+                            place.showObject(*o);
                         SK_INFO("Anclado: %d objeto(s)",
                                 static_cast<int>(selection.size()));
                     }
@@ -1421,17 +1610,17 @@ place.setOnReparent([&](const std::string& child,
 
         // --- Gizmo de herramientas: estado, hover y arrastre ---
         const int tool = workspace.tool();
-        const sk::SceneObject* primaryObj =
-            primary.empty() ? nullptr : scene.findByName(primary);
+        const sk::Instance* primaryObj = world.find(primary);
         const bool gizmoReady =
             place.visible() && workspace.visible() && tool >= 1 && primaryObj;
-        const sk::Vec3 gizmoOrigin = primaryObj ? primaryObj->position : sk::Vec3{};
+        const sk::Vec3 gizmoOrigin =
+            primaryObj ? primaryObj->position() : sk::Vec3{};
         float gizmoScaleMax = 1.0f;
         if (primaryObj) {
+            const sk::Vec3 gscale = primaryObj->scale();
             gizmoScaleMax = std::fmax(
-                std::fabs(primaryObj->scale.x),
-                std::fmax(std::fabs(primaryObj->scale.y),
-                          std::fabs(primaryObj->scale.z)));
+                std::fabs(gscale.x),
+                std::fmax(std::fabs(gscale.y), std::fabs(gscale.z)));
         }
         // Durante el arrastre el tamano visual se congela (L del arrastre).
         if (gizmoDrag.active) gizmoScaleMax = 2.0f * gizmoDrag.L - 2.0f;
@@ -1448,6 +1637,11 @@ place.setOnReparent([&](const std::string& child,
             hoverAxis = sk::hitTestGizmo(probe, window.mousePos(), viewProj, vpW, vpH);
         } else {
             hoverAxis = -1;
+        }
+        // El resaltado del gizmo cambia al pasar de un eje a otro: repinta.
+        if (hoverAxis != lastDrawnHover) {
+            needsRedraw = true;
+            lastDrawnHover = hoverAxis;
         }
 
         // Puntas de los ejes al cambiar de herramienta o de objeto
@@ -1503,9 +1697,9 @@ place.setOnReparent([&](const std::string& child,
                 // Part bloqueada (Locked): no se arrastra con el raton,
                 // aunque sus campos Transform sigan siendo editables.
                 bool anyLocked = false;
-                for (const std::string& name : selection) {
-                    const sk::SceneObject* object = scene.findByName(name);
-                    if (object && object->locked) {
+                for (sk::InstanceId id : selection) {
+                    const sk::Instance* object = world.find(id);
+                    if (object && object->propBool("Locked", false)) {
                         anyLocked = true;
                         break;
                     }
@@ -1514,14 +1708,14 @@ place.setOnReparent([&](const std::string& child,
                     const sk::Ray ray = sk::rayFromCamera(
                         camera, aspect, 60.0f, *pressed, vpW, vpH);
                     startedGizmo = sk::gizmoBegin(
-                        gizmoDrag, tool, pressAxis, scene, selection,
+                        gizmoDrag, tool, pressAxis, world, selection,
                         gizmoOrigin, gizmoScaleMax, gizmoViewDir, ray);
                 }
                 if (startedGizmo) {
-                    // El arrastre del gizmo sustituye al marquee.
+                    // El arrastre del gizmo sustituye al marquee. El undo
+                    // se registra al soltar (delta transform).
                     dragPending = false;
                     dragActive = false;
-                    captureState(); // undo: estado previo al arrastre
                     if (pressAxis < 3) {
                         SK_INFO("gizmo %s: arrastre eje %c", kToolNames[tool],
                                 "XYZ"[pressAxis]);
@@ -1535,13 +1729,13 @@ place.setOnReparent([&](const std::string& child,
                 dragPending = true;
                 dragActive = false;
                 dragStart = *pressed;
-                // Cuerpo de un parte bajo el puntero: candidato a arrastre
+                // Cuerpo de una parte bajo el puntero: candidato a arrastre
                 // de objeto (se confirma al superar el umbral de arrastre).
                 pressCtrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-                pressHit.clear();
+                pressHit = sk::kInvalidId;
                 if (!pressCtrl) {
                     pressHit = sk::pickObject(
-                        scene, sk::rayFromCamera(camera, aspect, 60.0f,
+                        world, sk::rayFromCamera(camera, aspect, 60.0f,
                                                  *pressed, vpW, vpH));
                 }
             }
@@ -1558,54 +1752,56 @@ place.setOnReparent([&](const std::string& child,
                 camera, aspect, 60.0f, dragStart, vpW, vpH);
             const sk::Ray ray1 = sk::rayFromCamera(
                 camera, aspect, 60.0f, window.mousePos(), vpW, vpH);
-            std::vector<std::string> dragged;
+            std::vector<sk::InstanceId> dragged;
             std::vector<sk::DragPose> startPose;
             dragged.reserve(objDragStart.size());
             startPose.reserve(objDragStart.size());
             int leadIndex = -1;
             for (const ObjDragStart& start : objDragStart) {
-                if (start.name == pressHit) {
+                if (start.id == pressHit) {
                     leadIndex = static_cast<int>(dragged.size());
                 }
-                dragged.push_back(start.name);
-                startPose.push_back({start.name, start.pos, start.rot});
+                dragged.push_back(start.id);
+                startPose.push_back({start.id, start.pos, start.rot});
             }
             const bool alignSurface = (GetKeyState(VK_MENU) & 0x8000) == 0;
             const bool snapGrid = (GetKeyState(VK_SHIFT) & 0x8000) == 0;
             sk::DragResult result;
-            sk::computeSurfaceDrag(scene, ray0, ray1, dragged, leadIndex,
+            sk::computeSurfaceDrag(world, ray0, ray1, dragged, leadIndex,
                                    grabOffset, startPose, alignSurface,
                                    snapGrid ? workspace.moveStep() : 0.0f,
                                    result);
             for (const sk::DragPose& pose : result.poses) {
-                if (sk::SceneObject* object = scene.findByName(pose.name)) {
-                    object->position = pose.position;
-                    object->rotation = pose.rotation;
+                if (sk::Instance* object = world.find(pose.id)) {
+                    object->setPosition(pose.position);
+                    object->setRotation(pose.rotation);
+                    world.markChanged(pose.id);
                 }
             }
+            ++contentVersion; // la escena cambio: rehacer models/contornos
             // Registro de la cara de destino: una sola vez por cara (las
-            // pruebas leen donde se apoya el parte sin spam de logs).
-            if (!snapLogged || result.surfaceName != snapSurface ||
+            // pruebas leen donde se apoya la parte sin spam de logs).
+            if (!snapLogged || result.surfaceId != snapSurface ||
                 sk::length(result.surfaceNormal - snapNormal) > 1e-3f) {
                 if (result.onSurface) {
                     SK_INFO("snap %s: cara de %s normal (%.2f,%.2f,%.2f)",
-                            pressHit.c_str(), result.surfaceName.c_str(),
+                            worldName(pressHit).c_str(),
+                            worldName(result.surfaceId).c_str(),
                             result.surfaceNormal.x, result.surfaceNormal.y,
                             result.surfaceNormal.z);
                 } else if (result.groundHit) {
-                    SK_INFO("snap %s: suelo Y=0", pressHit.c_str());
+                    SK_INFO("snap %s: suelo Y=0", worldName(pressHit).c_str());
                 } else {
                     SK_INFO("snap %s: cielo (x/z del plano de camara, "
                                           "apoyo en el suelo)",
-                            pressHit.c_str());
+                            worldName(pressHit).c_str());
                 }
                 snapLogged = true;
-                snapSurface = result.surfaceName;
+                snapSurface = result.surfaceId;
                 snapNormal = result.surfaceNormal;
             }
             if (selection.size() == 1) {
-                if (const sk::SceneObject* object =
-                        scene.findByName(selection.front())) {
+                if (const sk::Instance* object = world.find(selection.front())) {
                     place.showObject(*object, false); // Transform al dia sin relayout
                 }
             }
@@ -1615,12 +1811,13 @@ place.setOnReparent([&](const std::string& child,
         if (gizmoDrag.active) {
             const sk::Ray ray = sk::rayFromCamera(
                 camera, aspect, 60.0f, window.mousePos(), vpW, vpH);
-            if (sk::gizmoUpdate(gizmoDrag, ray, scene, workspace.moveStep(),
+            if (sk::gizmoUpdate(gizmoDrag, ray, world, workspace.moveStep(),
                             static_cast<float>(workspace.rotateStep())) &&
                 selection.size() == 1 &&
                 primaryObj) {
                 place.showObject(*primaryObj, false); // Transform al dia (sin relayout)
             }
+            ++contentVersion; // la escena cambio: rehacer models/contornos
         }
 
         // Registro al apuntar a un eje (una sola vez por punta: las
@@ -1672,32 +1869,32 @@ place.setOnReparent([&](const std::string& child,
             const sk::Vec2 pos = window.mousePos();
             if (std::abs(pos.x - dragStart.x) > thX ||
                 std::abs(pos.y - dragStart.y) > thY) {
-                if (!pressHit.empty()) {
-                    const sk::SceneObject* pressedObj =
-                        scene.findByName(pressHit);
-                    if (pressedObj && pressedObj->locked) {
+                if (pressHit != sk::kInvalidId) {
+                    const sk::Instance* pressedObj = world.find(pressHit);
+                    if (pressedObj && pressedObj->propBool("Locked", false)) {
                         // Part Locked: el cuerpo no inicia arrastre.
                         dragPending = false;
                         SK_INFO("drag %s: bloqueada (Locked)",
-                                pressHit.c_str());
+                                worldName(pressHit).c_str());
                     } else {
-                        // Es el cuerpo de un parte: arrastre de objeto en
+                        // Es el cuerpo de una parte: arrastre de objeto en
                         // vez de marquee (si no estaba seleccionado, pasa
                         // a serlo).
                         if (std::find(selection.begin(), selection.end(),
                                       pressHit) == selection.end()) {
                             applySelection({pressHit}, pressHit);
                         }
-                        captureState(); // undo: estado previo al arrastre
                         objDragActive = true;
                         objDragStart.clear();
-                        for (const std::string& name : selection) {
-                            const sk::SceneObject* object =
-                                scene.findByName(name);
-                            // Un parte Locked no viaja con el arrastre.
-                            if (!object || object->locked) continue;
+                        for (sk::InstanceId id : selection) {
+                            const sk::Instance* object = world.find(id);
+                            // Una parte Locked no viaja con el arrastre.
+                            if (!object ||
+                                object->propBool("Locked", false)) {
+                                continue;
+                            }
                             objDragStart.push_back(
-                                {name, object->position, object->rotation});
+                                {id, object->position(), object->rotation()});
                         }
                         // Punto de agarre (donde se pulso sobre el cuerpo)
                         // menos el centro del lead: fija la posicion del
@@ -1705,22 +1902,21 @@ place.setOnReparent([&](const std::string& child,
                         // arrastre.
                         const sk::Ray ray0 = sk::rayFromCamera(
                             camera, aspect, 60.0f, dragStart, vpW, vpH);
-                        const sk::SceneObject* hitObj =
-                            scene.findByName(pressHit);
+                        const sk::Instance* hitObj = world.find(pressHit);
                         grabOffset = {};
                         if (hitObj) {
                             sk::Vec3 grabPoint{};
                             sk::Vec3 grabNormal{};
                             if (sk::rayObjectFace(*hitObj, ray0, grabPoint,
                                                   grabNormal)) {
-                                grabOffset = grabPoint - hitObj->position;
+                                grabOffset = grabPoint - hitObj->position();
                             }
                         }
                         snapLogged = false; // el primer frame registra la cara
-                        snapSurface.clear();
+                        snapSurface = sk::kInvalidId;
                         snapNormal = {};
                         dragPending = false;
-                        SK_INFO("drag %s: arrastre", pressHit.c_str());
+                        SK_INFO("drag %s: arrastre", worldName(pressHit).c_str());
                     }
                 } else {
                     dragActive = true;
@@ -1732,44 +1928,62 @@ place.setOnReparent([&](const std::string& child,
             }
         }
         if (released && objDragActive) {
-            // Fin del arrastre: registrar el cambio y guardar.
+            // Fin del arrastre: registrar el cambio (undo) y guardar.
+            std::vector<sk::CommandPtr> parts;
             for (const ObjDragStart& start : objDragStart) {
-                const sk::SceneObject* object = scene.findByName(start.name);
+                const sk::Instance* object = world.find(start.id);
                 if (!object) continue;
                 SK_INFO("drag %s: pos (%.2f,%.2f,%.2f)->(%.2f,%.2f,%.2f) "
                         "rot (%.2f,%.2f,%.2f)->(%.2f,%.2f,%.2f)",
-                        start.name.c_str(), start.pos.x, start.pos.y,
-                        start.pos.z, object->position.x, object->position.y,
-                        object->position.z, start.rot.x, start.rot.y,
-                        start.rot.z, object->rotation.x, object->rotation.y,
-                        object->rotation.z);
+                        worldName(start.id).c_str(), start.pos.x, start.pos.y,
+                        start.pos.z, object->position().x,
+                        object->position().y, object->position().z,
+                        start.rot.x, start.rot.y, start.rot.z,
+                        object->rotation().x, object->rotation().y,
+                        object->rotation().z);
+                parts.push_back(sk::makeTransformCommandExplicit(
+                    start.id, start.pos, start.rot, object->scale(),
+                    object->position(), object->rotation(),
+                    object->scale()));
             }
             objDragActive = false;
             objDragStart.clear();
-            pressHit.clear();
+            pressHit = sk::kInvalidId;
             dragPending = false;
             lastTipsTool = -1; // las puntas del gizmo siguen al objeto
+            if (!parts.empty()) {
+                undo.push(world, sk::makeCompoundCommand(std::move(parts)));
+            }
             saveScene();
             applySelection(selection, primary);
         } else if (released && gizmoDrag.active) {
-            // Fin del arrastre: registrar el cambio, guardar y refrescar.
+            // Fin del arrastre: registrar el cambio (undo), guardar y
+            // refrescar.
+            std::vector<sk::CommandPtr> parts;
             for (const sk::GizmoSnapshot& snap : gizmoDrag.snapshots) {
-                const sk::SceneObject* object = scene.findByName(snap.name);
+                const sk::Instance* object = world.find(snap.id);
                 if (!object) continue;
                 SK_INFO("gizmo %s: %s pos (%.2f,%.2f,%.2f)->(%.2f,%.2f,%.2f) "
                         "rot (%.2f,%.2f,%.2f)->(%.2f,%.2f,%.2f) "
                         "esc (%.2f,%.2f,%.2f)->(%.2f,%.2f,%.2f)",
-                        kToolNames[gizmoDrag.tool], snap.name.c_str(),
+                        kToolNames[gizmoDrag.tool], worldName(snap.id).c_str(),
                         snap.position.x, snap.position.y, snap.position.z,
-                        object->position.x, object->position.y,
-                        object->position.z, snap.rotation.x, snap.rotation.y,
-                        snap.rotation.z, object->rotation.x, object->rotation.y,
-                        object->rotation.z, snap.scale.x, snap.scale.y,
-                        snap.scale.z, object->scale.x, object->scale.y,
-                        object->scale.z);
+                        object->position().x, object->position().y,
+                        object->position().z, snap.rotation.x, snap.rotation.y,
+                        snap.rotation.z, object->rotation().x,
+                        object->rotation().y, object->rotation().z,
+                        snap.scale.x, snap.scale.y, snap.scale.z,
+                        object->scale().x, object->scale().y,
+                        object->scale().z);
+                parts.push_back(sk::makeTransformCommandExplicit(
+                    snap.id, snap.position, snap.rotation, snap.scale,
+                    object->position(), object->rotation(), object->scale()));
             }
             gizmoDrag.active = false;
             lastTipsTool = -1; // las puntas han podido cambiar
+            if (!parts.empty()) {
+                undo.push(world, sk::makeCompoundCommand(std::move(parts)));
+            }
             saveScene();
             applySelection(selection, primary);
         } else if (released && (dragPending || dragActive)) {
@@ -1792,142 +2006,223 @@ place.setOnReparent([&](const std::string& child,
                 y0 = std::fmax(y0, vy0);
                 x1 = std::fmin(x1, vx1);
                 y1 = std::fmin(y1, vy1);
-                std::vector<std::string> hits;
+                std::vector<sk::InstanceId> hits;
                 if (x0 < x1 && y0 < y1) {
-                    hits = sk::selectInRect(scene, viewProj,
+                    hits = sk::selectInRect(world, viewProj,
                                             sk::Vec2{x0, y0}, sk::Vec2{x1, y1},
                                             vpW, vpH);
                 }
                 SK_INFO("marquee -> %d objetos", static_cast<int>(hits.size()));
-                std::string newPrimary = primary;
+                sk::InstanceId newPrimary = primary;
                 if (std::find(hits.begin(), hits.end(), primary) == hits.end()) {
-                    newPrimary = hits.empty() ? std::string() : hits.front();
+                    newPrimary = hits.empty() ? sk::kInvalidId : hits.front();
                 }
                 applySelection(std::move(hits), newPrimary);
             } else {
                 // Click simple: el objeto mas cercano bajo el puntero.
-                const std::string hit = sk::pickObject(
-                    scene, sk::rayFromCamera(camera, aspect, 60.0f, *released,
+                const sk::InstanceId hit = sk::pickObject(
+                    world, sk::rayFromCamera(camera, aspect, 60.0f, *released,
                                              vpW, vpH));
                 SK_INFO("pick (%d,%d) -> %s", static_cast<int>(released->x),
                         static_cast<int>(released->y),
-                        hit.empty() ? "(nada)" : hit.c_str());
-                std::vector<std::string> names = selection;
-                std::string newPrimary = primary;
-                if (hit.empty()) {
-                    names.clear();       // click en vacio: deselecciona
-                    newPrimary.clear();
+                        hit == sk::kInvalidId ? "(nada)"
+                                              : worldName(hit).c_str());
+                std::vector<sk::InstanceId> ids = selection;
+                sk::InstanceId newPrimary = primary;
+                if (hit == sk::kInvalidId) {
+                    ids.clear();       // click en vacio: deselecciona
+                    newPrimary = sk::kInvalidId;
                 } else if (ctrl) {
-                    const auto it = std::find(names.begin(), names.end(), hit);
-                    if (it != names.end()) {
-                        names.erase(it); // quitar de la seleccion
+                    const auto it = std::find(ids.begin(), ids.end(), hit);
+                    if (it != ids.end()) {
+                        ids.erase(it); // quitar de la seleccion
                         if (newPrimary == hit) {
-                            newPrimary =
-                                names.empty() ? std::string() : names.front();
+                            newPrimary = ids.empty() ? sk::kInvalidId
+                                                     : ids.front();
                         }
                     } else {
-                        names.push_back(hit); // anadir (Ctrl)
+                        ids.push_back(hit); // anadir (Ctrl)
                         newPrimary = hit;
                     }
                 } else {
-                    names = {hit};
+                    ids = {hit};
                     newPrimary = hit;
                 }
-                applySelection(std::move(names), newPrimary);
+                applySelection(std::move(ids), newPrimary);
             }
         }
 
         if (logProjection && place.visible()) {
             logProjection = false;
-            for (const sk::SceneObject& object : scene.objects()) {
+            for (sk::InstanceId id : allInstances()) {
+                const sk::Instance* object = world.find(id);
+                if (!object || !object->isRenderable()) continue;
                 sk::Vec3 ndc;
-                if (sk::transformPoint(viewProj, object.position, ndc)) {
+                if (sk::transformPoint(viewProj, object->position(), ndc)) {
                     const float px = (ndc.x * 0.5f + 0.5f) * vpW;
                     const float py = (ndc.y * 0.5f + 0.5f) * vpH;
-                    SK_INFO("%s pantalla (%d,%d)", object.name.c_str(),
+                    SK_INFO("%s pantalla (%d,%d)", object->name().c_str(),
                             static_cast<int>(px), static_cast<int>(py));
                 }
             }
         }
 
-        std::vector<sk::Mat4> models;
-        std::vector<int> shapeIds;
-        models.reserve(scene.objects().size());
-        shapeIds.reserve(scene.objects().size());
-        for (const sk::SceneObject& object : scene.objects()) {
-            if (!sk::isRenderableClass(object.className)) continue;
-            models.push_back(object.modelMatrix());
-            shapeIds.push_back(static_cast<int>(object.shape));
-        }
+        // --- Dibujo bajo demanda ---
+        // Solo se llama a drawFrame si algo cambio o hay interaccion
+        // sostenida (camara, arrastres, ventana Play). En reposo no se
+        // dibuja nada y el bucle duerme sin consumir CPU.
+        const bool dragging = gizmoDrag.active || objDragActive ||
+                              dragActive || dragPending;
+        const bool camKeysHeld =
+            window.hasFocus() && !window.textInputFocused() &&
+            (window.keyDown('W') || window.keyDown('A') ||
+             window.keyDown('S') || window.keyDown('D') ||
+             window.keyDown('Q') || window.keyDown('E'));
+        continuous = camKeysHeld || window.mouseRightDown() || dragging ||
+                     play.active();
 
-        // Contorno celeste: el cubo alambre un 2% mas grande que el
-        // objeto, para que asoma por el borde de la malla.
-        std::vector<sk::Mat4> outlines;
-        outlines.reserve(selection.size());
-        for (const std::string& name : selection) {
-            const sk::SceneObject* object = scene.findByName(name);
-            if (object) {
-                outlines.push_back(object->modelMatrix() *
-                                   sk::scale(sk::Vec3{1.02f, 1.02f, 1.02f}));
+        if (needsRedraw || continuous) {
+            // models/shapeIds/outlines se cachean: solo se reconstruyen
+            // cuando cambia la version de contenido (escena/seleccion).
+            if (contentVersion != builtVersion) {
+                builtVersion = contentVersion;
+                modelCache.clear();
+                shapeCache.clear();
+                const std::vector<sk::RenderPart>& parts = world.renderParts();
+                modelCache.reserve(parts.size());
+                shapeCache.reserve(parts.size());
+                for (const sk::RenderPart& part : parts) {
+                    modelCache.push_back(part.model);
+                    shapeCache.push_back(part.shape);
+                }
+                // Contorno celeste: el cubo alambre un 2% mas grande que
+                // el objeto, para que asome por el borde de la malla.
+                outlineCache.clear();
+                outlineCache.reserve(selection.size());
+                for (sk::InstanceId id : selection) {
+                    const sk::Instance* object = world.find(id);
+                    if (object) {
+                        outlineCache.push_back(
+                            object->modelMatrix() *
+                            sk::scale(sk::Vec3{1.02f, 1.02f, 1.02f}));
+                    }
+                }
             }
-        }
 
-        // Rectangulo de arrastre mientras dura el marquee. Se muestra
-        // igual que la seleccion al soltar: clamado al viewport para que
-        // el rectangulo visible coincida con lo que se selecciona.
-        sk::ScreenRect marquee;
-        if (dragActive && inViewport(dragStart)) {
-            const sk::Vec2 pos = window.mousePos();
-            float x0 = std::fmin(dragStart.x, pos.x);
-            float y0 = std::fmin(dragStart.y, pos.y);
-            float x1 = std::fmax(dragStart.x, pos.x);
-            float y1 = std::fmax(dragStart.y, pos.y);
-            x0 = std::fmax(x0, static_cast<float>(
-                                   sk::PlaceView::kPropertiesWidth));
-            y0 = std::fmax(y0, static_cast<float>(
-                                   sk::WorkspaceTabs::kTopBandHeight));
-            x1 = std::fmin(x1, static_cast<float>(
-                                   vpW - sk::PlaceView::kExplorerWidth));
-            y1 = std::fmin(y1, static_cast<float>(vpH));
-            marquee.valid = true;
-            marquee.x0 = x0;
-            marquee.y0 = y0;
-            marquee.x1 = x1;
-            marquee.y1 = y1;
-        }
-
-        // Lineas del gizmo: un vertice por extremo de segmento (el
-        // renderer clama al buffer si hubiera mas de kGizmoCapacity).
-        std::vector<sk::LineVertex> gizmoLines;
-        if (gizmoReady) {
-            // Resalta el mango bajo el puntero o el mango agarrado.
-            int paintAxis = hoverAxis;
-            if (gizmoDrag.active) {
-                paintAxis = gizmoDrag.axis +
-                            (gizmoDrag.axisSign < 0 ? 3 : 0);
+            // Rectangulo de arrastre mientras dura el marquee. Se muestra
+            // igual que la seleccion al soltar: clamado al viewport para
+            // que el rectangulo visible coincida con lo que se selecciona.
+            sk::ScreenRect marquee;
+            if (dragActive && inViewport(dragStart)) {
+                const sk::Vec2 pos = window.mousePos();
+                float x0 = std::fmin(dragStart.x, pos.x);
+                float y0 = std::fmin(dragStart.y, pos.y);
+                float x1 = std::fmax(dragStart.x, pos.x);
+                float y1 = std::fmax(dragStart.y, pos.y);
+                x0 = std::fmax(x0, static_cast<float>(
+                                       sk::PlaceView::kPropertiesWidth));
+                y0 = std::fmax(y0, static_cast<float>(
+                                       sk::WorkspaceTabs::kTopBandHeight));
+                x1 = std::fmin(x1, static_cast<float>(
+                                       vpW - sk::PlaceView::kExplorerWidth));
+                y1 = std::fmin(y1, static_cast<float>(vpH));
+                marquee.valid = true;
+                marquee.x0 = x0;
+                marquee.y0 = y0;
+                marquee.x1 = x1;
+                marquee.y1 = y1;
             }
-            const std::vector<sk::GizmoLine> geo = sk::buildGizmo(
-                gizmoDrag.active ? gizmoDrag.tool : tool, gizmoOrigin,
-                gizmoScaleMax, gizmoViewDir, paintAxis);
-            gizmoLines.reserve(geo.size() * 2);
-            for (const sk::GizmoLine& line : geo) {
-                gizmoLines.push_back({{line.a.x, line.a.y, line.a.z},
-                                      {line.color.x, line.color.y, line.color.z}});
-                gizmoLines.push_back({{line.b.x, line.b.y, line.b.z},
-                                      {line.color.x, line.color.y, line.color.z}});
-            }
-        }
 
-        if (!renderer.drawFrame(viewProj, models, shapeIds, outlines, marquee, gizmoLines)) {
-            SK_ERROR("drawFrame fallo");
-            return 1;
+            // Lineas del gizmo: un vertice por extremo de segmento (el
+            // renderer clama al buffer si hubiera mas de kGizmoCapacity).
+            std::vector<sk::LineVertex> gizmoLines;
+            if (gizmoReady) {
+                // Resalta el mango bajo el puntero o el mango agarrado.
+                int paintAxis = hoverAxis;
+                if (gizmoDrag.active) {
+                    paintAxis = gizmoDrag.axis +
+                                (gizmoDrag.axisSign < 0 ? 3 : 0);
+                }
+                const std::vector<sk::GizmoLine> geo = sk::buildGizmo(
+                    gizmoDrag.active ? gizmoDrag.tool : tool, gizmoOrigin,
+                    gizmoScaleMax, gizmoViewDir, paintAxis);
+                gizmoLines.reserve(geo.size() * 2);
+                for (const sk::GizmoLine& line : geo) {
+                    gizmoLines.push_back(
+                        {{line.a.x, line.a.y, line.a.z},
+                         {line.color.x, line.color.y, line.color.z}});
+                    gizmoLines.push_back(
+                        {{line.b.x, line.b.y, line.b.z},
+                         {line.color.x, line.color.y, line.color.z}});
+                }
+            }
+            // El buffer GPU del gizmo solo se reescribe si cambio.
+            const bool gizmoChanged =
+                gizmoLines.size() != lastGizmo.size() ||
+                (gizmoLines.size() != 0 &&
+                 std::memcmp(gizmoLines.data(), lastGizmo.data(),
+                             gizmoLines.size() * sizeof(sk::LineVertex)) != 0);
+            if (gizmoChanged) lastGizmo = gizmoLines;
+
+            const double drawStart = statsEnabled ? nowSeconds() : 0.0;
+            if (!renderer.drawFrame(viewProj, modelCache, shapeCache,
+                                    outlineCache, marquee, gizmoLines,
+                                    gizmoChanged)) {
+                SK_ERROR("drawFrame fallo");
+                return 1;
+            }
+            needsRedraw = false;
+            lastDrawWall = nowSeconds();
+            if (statsEnabled) {
+                statsAccum += lastDrawWall - drawStart;
+                ++statsFrames;
+            }
         }
 
         // Ventana Play/Run: su propio renderer, mismo bucle principal.
-        play.renderFrame(scene, camera);
+        play.renderFrame(world, camera);
+
+        // --- Guardado diferido: 500 ms tras el ultimo cambio, nunca a
+        // mitad de un arrastre. Al cerrar/salir/Guardar se vuelca aparte.
+        if (sceneDirty && !dragging && (now - lastSceneChange) >= 0.5) {
+            writeSceneNow();
+        }
+
+        // --- --stats: cada 5 s, frames dibujados y tiempo medio ---
+        if (statsEnabled && (now - statsWindowStart) >= 5.0) {
+            const double avgMs =
+                statsFrames ? (statsAccum / statsFrames) * 1000.0 : 0.0;
+            SK_INFO("stats: %llu frames dibujados, %.2f ms/frame",
+                    statsFrames, avgMs);
+            statsWindowStart = now;
+            statsFrames = 0;
+            statsAccum = 0.0;
+        }
 
         ++frame;
+
+        // --- Espera del bucle ---
+        // Modo test (--frames): no bloquea para llegar al conteo. En
+        // interaccion: mantiene el limite de FPS. Con guardado pendiente:
+        // espera lo que falta. En reposo: duerme sin gastar CPU.
+        if (maxFrames >= 0) {
+            // sin espera
+        } else if (continuous) {
+            const double wait = (lastDrawWall + frameInterval) - nowSeconds();
+            if (wait > 0.0005) {
+                window.waitEvents(static_cast<unsigned long>(wait * 1000.0));
+            }
+        } else if (sceneDirty) {
+            const double wait = (lastSceneChange + 0.5) - nowSeconds();
+            if (wait > 0.0005) {
+                window.waitEvents(static_cast<unsigned long>(wait * 1000.0));
+            }
+        } else {
+            window.waitEvents(INFINITE);
+        }
     }
+
+    writeSceneNow(); // volcar cualquier cambio pendiente al salir
 
     code.destroy();
     place.destroy();
@@ -1935,6 +2230,7 @@ place.setOnReparent([&](const std::string& child,
     panel.destroy();
     renderer.shutdown();
     window.destroy();
+    sk::ui::shutdownIconAtlas();
 
     const double elapsed = nowSeconds() - startTime;
     SK_INFO("saliendo tras %d frames (%.1fs)", frame, elapsed);

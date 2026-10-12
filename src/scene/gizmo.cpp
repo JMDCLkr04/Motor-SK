@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <cmath>
 
-#include "scene.h"
+#include "world.h"
 
 namespace sk {
 
@@ -220,8 +220,8 @@ Vec3 gizmoHandlePoint(int tool, int handle, const Vec3& origin, float scaleMax) 
     return origin + kAxisDirs[axis] * (sign * L);
 }
 
-bool gizmoBegin(GizmoDrag& drag, int tool, int handle, const Scene& scene,
-                const std::vector<std::string>& selection, const Vec3& origin,
+bool gizmoBegin(GizmoDrag& drag, int tool, int handle, const World& world,
+                const std::vector<InstanceId>& selection, const Vec3& origin,
                 float scaleMax, const Vec3& viewDir, const Ray& ray) {
     const int maxHandle = (tool == 3) ? 2 : 5;
     if (selection.empty() || handle < 0 || handle > maxHandle || tool < 1 ||
@@ -238,14 +238,14 @@ bool gizmoBegin(GizmoDrag& drag, int tool, int handle, const Scene& scene,
     d.axisDir = kAxisDirs[d.axis];
     d.L = 0.5f * std::fabs(scaleMax) + 1.0f;
     d.snapshots.reserve(selection.size());
-    for (const std::string& name : selection) {
-        const SceneObject* object = scene.findByName(name);
+    for (InstanceId id : selection) {
+        const Instance* object = world.find(id);
         if (!object) continue;
         GizmoSnapshot snap;
-        snap.name = object->name;
-        snap.position = object->position;
-        snap.rotation = object->rotation;
-        snap.scale = object->scale;
+        snap.id = object->id();
+        snap.position = object->position();
+        snap.rotation = object->rotation();
+        snap.scale = object->scale();
         d.snapshots.push_back(std::move(snap));
     }
     if (d.snapshots.empty()) return false;
@@ -282,7 +282,7 @@ bool gizmoBegin(GizmoDrag& drag, int tool, int handle, const Scene& scene,
     return true;
 }
 
-bool gizmoUpdate(GizmoDrag& drag, const Ray& ray, Scene& scene,
+bool gizmoUpdate(GizmoDrag& drag, const Ray& ray, World& world,
                  float moveStep, float rotStep) {
     if (!drag.active) return false;
 
@@ -300,48 +300,42 @@ bool gizmoUpdate(GizmoDrag& drag, const Ray& ray, Scene& scene,
         const Vec3 delta =
             drag.axisDir * snapStep(s - drag.s0, moveStep);
         for (const GizmoSnapshot& snap : drag.snapshots) {
-            SceneObject* object = scene.findByName(snap.name);
-            if (object) object->position = snap.position + delta;
+            Instance* object = world.find(snap.id);
+            if (object) object->setPosition(snap.position + delta);
         }
+        world.invalidateRender();
         return true;
     }
 
     if (drag.tool == 2) {
-        // Escalar: factor sobre la componente del eje arrastrado, con la
-        // cara OPUESTA al mango anclada (la posicion se desplaza media
-        // variacion de escala hacia la direccion del mango). Si el
-        // objeto esta rotado el anclaje usa los ejes de mundo (AABB del
-        // gizmo), suficiente para la seleccion tipica sin rotar. La
-        // variacion de tamano se redondea a `moveStep` (tick 0.1 => la
-        // escala salta de 0.1 en 0.1).
+        // Escalar.
         const float s = dot(hit - drag.origin, drag.axisDir);
-        // Con el mango negativo (handle 3..5) alejarse del centro va en
-        // -eje: el signo invierte el factor para que arrastrar hacia
-        // fuera siempre crezca.
         float factor =
             1.0f + drag.axisSign * (s - drag.s0) / drag.L;
         factor = std::max(0.05f, std::min(1000.0f, factor));
         for (const GizmoSnapshot& snap : drag.snapshots) {
-            SceneObject* object = scene.findByName(snap.name);
+            Instance* object = world.find(snap.id);
             if (!object) continue;
-            object->scale = snap.scale;
-            const float oldComp = component(snap.scale, drag.axis);
+            object->setScale(snap.scale);
+            Vec3 sc = snap.scale;
+            Vec3 pos = snap.position;
+            const float oldComp = component(sc, drag.axis);
             const float rawNew = oldComp * factor;
             const float newComp =
                 std::max(0.05f,
                          oldComp + snapStep(rawNew - oldComp, moveStep));
-            setComponent(object->scale, drag.axis, newComp);
-            object->position = snap.position;
-            setComponent(object->position, drag.axis,
+            setComponent(sc, drag.axis, newComp);
+            setComponent(pos, drag.axis,
                          component(snap.position, drag.axis) +
                              drag.axisSign * 0.5f * (newComp - oldComp));
+            object->setScale(sc);
+            object->setPosition(pos);
         }
+        world.invalidateRender();
         return true;
     }
 
-    // Rotar: el delta de angulo alrededor del eje propio de cada objeto
-    // (la posicion no cambia: gira en su centro). El angulo se redondea
-    // a `rotStep` grados enteros.
+    // Rotar.
     Vec3 u, v;
     circleBasis(drag.axisDir, u, v);
     const Vec3 rel = hit - drag.origin;
@@ -351,24 +345,27 @@ bool gizmoUpdate(GizmoDrag& drag, const Ray& ray, Scene& scene,
     while (delta < -kPi) delta += kTwoPi;
     const float deltaDeg = snapStep(delta * (180.0f / kPi), rotStep);
     for (const GizmoSnapshot& snap : drag.snapshots) {
-        SceneObject* object = scene.findByName(snap.name);
+        Instance* object = world.find(snap.id);
         if (!object) continue;
-        object->rotation = snap.rotation;
-        setComponent(object->rotation, drag.axis,
+        Vec3 rot = snap.rotation;
+        setComponent(rot, drag.axis,
                      normalizeDegrees(component(snap.rotation, drag.axis) +
                                       deltaDeg));
+        object->setRotation(rot);
     }
+    world.invalidateRender();
     return true;
 }
 
-void gizmoRevert(GizmoDrag& drag, Scene& scene) {
+void gizmoRevert(GizmoDrag& drag, World& world) {
     for (const GizmoSnapshot& snap : drag.snapshots) {
-        SceneObject* object = scene.findByName(snap.name);
+        Instance* object = world.find(snap.id);
         if (!object) continue;
-        object->position = snap.position;
-        object->rotation = snap.rotation;
-        object->scale = snap.scale;
+        object->setPosition(snap.position);
+        object->setRotation(snap.rotation);
+        object->setScale(snap.scale);
     }
+    world.invalidateRender();
 }
 
 } // namespace sk

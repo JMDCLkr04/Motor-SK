@@ -7,7 +7,8 @@
 #include <windows.h>
 #include <commctrl.h>
 
-#include "../scene/scene.h"
+#include "../scene/instance.h"
+#include "../scene/world.h"
 
 namespace sk {
 
@@ -21,18 +22,15 @@ struct RowBand {
 
 // Paneles laterales de la division PLACE: Properties (Nombre editable,
 // fila Parent de solo lectura y Transform) a la izquierda y el Explorer
-// (arbol con la raiz dimension01) a la derecha, sobre la vista 3D. Son
-// dos ventanas hijas de la principal (con WS_CLIPCHILDREN para que el
-// present no las tape).
+// (arbol del World) a la derecha, sobre la vista 3D. Son dos ventanas
+// hijas de la principal (con WS_CLIPCHILDREN para que el present no las
+// tape).
 //
-// El Explorer arranca con una unica raiz "dimension01" (la escena del
-// lugar) y recibe los objetos anadidos con addObject(). Properties
-// muestra el Nombre del objeto seleccionado en un campo editable (solo
-// habilitado con un parte seleccionado), su Parent (la raiz
-// dimension01; solo lectura, pintado apagado) y el Transform en
-// cascada: "Transform" se pliega y dentro Position/Rotation/Scale
-// muestran un resumen "x, y, z" editable y los tres ejes al
-// desplegarlas.
+// El Explorer muestra el arbol del World: el grupo "Dimensions" con cada
+// dimension y sus objetos y el grupo "Scripts" con el arbol global de
+// scripts. Los nodos de escena guardan su InstanceId en lParam (>= 1);
+// los grupos sinteticos y las entradas de disco usan 0. Properties lee
+// las propiedades de la Instance seleccionada por id.
 class PlaceView {
 public:
     static constexpr int kExplorerWidth = 260;
@@ -41,12 +39,12 @@ public:
     bool create(void* parentHwnd);
     void destroy();
 
-    // Rutas base que alimentan los grupos sinteticos del Explorer:
-    // "Scripts" (carpetas globales Server/Shared/Player/Character) y
-    // "Assets" (Models/Meshes/Images/Textures/Audio/Animations/
-    // ModuleScripts). Se leen del disco al reconstruir el arbol.
+    // Rutas base que alimentan el grupo sintetico Assets del Explorer.
     void setScriptsRoot(const std::string& path) { scriptsRoot_ = path; }
     void setAssetsRoot(const std::string& path) { assetsRoot_ = path; }
+
+    // World que alimenta el Explorer y las Properties. No se posee.
+    void setWorld(const World* world) { world_ = world; }
 
     // Panel Output (pestana izquierda): agrega una linea con el color
     // segun el nivel (0 info, 1 aviso, 2 error). El dueno engancha aqui
@@ -60,131 +58,108 @@ public:
     // desde WorkspaceTabs::kTopBandHeight hasta el borde inferior.
     void resize(int width, int height);
 
-    // Explorer: inserta un hijo bajo dimension01 (u otro padre si el
-    // arbol ya lo tiene) y lo selecciona (lo que dispara
-    // onSelectionChanged). clearObjects quita todos los hijos y vuelve
-    // a seleccionar la raiz.
-    void addObject(const std::string& name);
-    void addObject(const std::string& name, const std::string& parent);
-
-    // Reconstruye todo el arbol a partir de los objetos y su jerarquia
-    // (parent): util tras cargar, deshacer/rehacer o re-agrupar. Los
-    // nombres deben ser unicos. Deja el caret en el ultimo objeto.
-    void rebuildTree(const std::vector<SceneObject>& objects);
+    // Reconstruye todo el arbol a partir del World y su jerarquia. Util
+    // tras cargar, insertar, deshacer/rehacer o re-agrupar. Deja el caret
+    // en el ultimo objeto.
+    void rebuildTree(const World& world);
     void clearObjects();
 
-    // Properties: refresca el panel con el objeto, la raiz o el estado
+    // Properties: refresca el panel con la instancia, la raiz o el estado
     // "Sin objeto seleccionado". showObject refresca valores y, salvo que
     // relayout sea false, recoloca los controles (el dueno lo pasa false
     // mientras arrastra un objeto/gizmo para no rehacer el panel cada
     // frame, que es lo que hace que parpadee).
-    void showObject(const SceneObject& object, bool relayout = true);
+    void showObject(const Instance& instance, bool relayout = true);
     void showRoot();
     void showNoSelection();
 
     // Seleccion multiple proveniente del viewport: mueve el caret del
-    // arbol al objeto "primary" sin disparar onSelectionChanged (el
-    // dueno ya tiene el estado y pinta el con showObject/showMultiple).
-    void syncTreeSelection(const std::string& primary);
+    // arbol al objeto "primary" sin disparar onSelectionChanged.
+    void syncTreeSelection(InstanceId id);
 
-    // Properties con varios objetos seleccionados: estado "-N objetos
-    // seleccionados-" y el resto de campos apagados.
+    // Properties con varios objetos seleccionados.
     void showMultiple(int count);
 
-    // Se invoca con el nombre del nodo seleccionado ("" si no hay
-    // seleccion). El dueno decide que hacer con la escena.
-    void setOnSelectionChanged(std::function<void(const std::string&)> cb) {
+    // Se invoca con el id del nodo seleccionado (kInvalidId si no hay
+    // seleccion). El dueno decide que hacer con el World.
+    void setOnSelectionChanged(std::function<void(InstanceId)> cb) {
         onSelectionChanged_ = std::move(cb);
     }
 
     // Arrastrar un objeto del Explorer y soltarlo sobre otro: el objeto
     // soltado (parent) absorbe al de debajo del cursor (child), que
-    // queda anidado dentro de el en el arbol. Si parent viene vacio el
-    // child vuelve a la raiz. El dueno valida (ciclos), muta la escena,
-    // guarda y reconstruye el arbol.
+    // queda anidado dentro de el. Si el destino es el grupo Dimensions,
+    // child vuelve a la dimension raiz (parent = kInvalidId).
     void setOnReparent(
-        std::function<void(const std::string& child,
-                           const std::string& parent)> cb) {
+        std::function<void(InstanceId child, InstanceId parent)> cb) {
         onReparent_ = std::move(cb);
     }
 
-    // Campo Transform (ids 200..208) editado: el usuario tecleo un valor
-    // y el campo perdio el foco. El dueno lo aplica al objeto y guarda.
+    // Campo Transform (ids 200..208) editado.
     void setOnTransformEdited(
-        std::function<void(const std::string&, int id, float value)> cb) {
+        std::function<void(InstanceId, int id, float value)> cb) {
         onTransformEdited_ = std::move(cb);
     }
 
-    // Campo Nombre (id 100) editado: el usuario tecleo un nombre y
-    // perdio el foco o pulso Enter. El dueno valida, renombra el objeto
-    // y guarda; si devuelve false el panel restaura el texto anterior.
+    // Campo Nombre (id 100) editado: si devuelve false se restaura el
+    // texto anterior.
     void setOnNameEdited(
-        std::function<bool(const std::string& oldName,
-                           const std::string& newName)> cb) {
+        std::function<bool(InstanceId id, const std::string& newName)> cb) {
         onNameEdited_ = std::move(cb);
     }
 
-    // Checkbox de Appearance/Collision/Data (ids 400..405): el usuario
-    // alterna el valor. El dueno lo aplica al objeto y guarda.
+    // Checkbox de Appearance/Data/Collision (ids 400..403).
     void setOnBoolEdited(
-        std::function<void(const std::string&, int id, bool value)> cb) {
+        std::function<void(InstanceId, int id, bool value)> cb) {
         onBoolEdited_ = std::move(cb);
     }
 
     // Campo float de Appearance (ids 410..411): Reflectance/Transparency.
-    // El dueno lo aplica al objeto (clamado 0..1) y guarda.
     void setOnFloatEdited(
-        std::function<void(const std::string&, int id, float value)> cb) {
+        std::function<void(InstanceId, int id, float value)> cb) {
         onFloatEdited_ = std::move(cb);
     }
 
-    // Campo Pivot (ids 500..508): Position/Orientation del pivote.
-    // El dueno lo aplica al objeto y guarda.
+    // Campo Pivot (ids 500..505): Position/Orientation del pivote.
     void setOnPivotEdited(
-        std::function<void(const std::string&, int id, float value)> cb) {
+        std::function<void(InstanceId, int id, float value)> cb) {
         onPivotEdited_ = std::move(cb);
     }
 
-    // Seccion Attributes (id 700): el usuario edito el texto multilinea
-    // ("nombre | tipo | valor" por linea). El dueno lo parsea, lo aplica
-    // al objeto y guarda.
+    // Seccion Attributes (id 700): texto multilinea "nombre | tipo | valor".
     void setOnAttributesEdited(
-        std::function<void(const std::string&, const std::string&)> cb) {
+        std::function<void(InstanceId, const std::string&)> cb) {
         onAttributesEdited_ = std::move(cb);
     }
 
     // Seccion Tags (id 701): una etiqueta por linea.
     void setOnTagsEdited(
-        std::function<void(const std::string&, const std::string&)> cb) {
+        std::function<void(InstanceId, const std::string&)> cb) {
         onTagsEdited_ = std::move(cb);
     }
 
-    // Boton "+" del Explorer: insertar una clase del catalogo bajo el
-    // objeto indicado (parent). El dueno crea el nodo y reconstruye.
+    // Boton "+" del Explorer: insertar una clase bajo el nodo (parent).
     void setOnInsertClass(
-        std::function<void(const std::string& parent,
-                           const std::string& className)> cb) {
+        std::function<void(InstanceId parent, const std::string& className)>
+            cb) {
         onInsertClass_ = std::move(cb);
     }
 
-    // Renombra el nodo del Explorer (oldName -> newName) sin disparar
+    // Renombra el nodo del Explorer (id -> newName) sin disparar
     // onSelectionChanged: el caret sigue en el mismo nodo.
-    void renameTreeItem(const std::string& oldName, const std::string& newName);
+    void renameTreeItem(InstanceId id, const std::string& newName);
 
-    // Quita el nodo del Explorer (por nombre) sin disparar
+    // Quita el nodo del Explorer (por id) sin disparar
     // onSelectionChanged: el dueno ya gestiona la seleccion.
-    void removeTreeItem(const std::string& name);
+    void removeTreeItem(InstanceId id);
 
     // Estado de un checkbox de bool (ids 400..403): cambia el valor y
-    // repinta la casilla solo si cambio. Publica porque tambien la usan
-    // los helpers internos del panel (resetPartFields).
+    // repinta la casilla solo si cambio.
     void setCheck(int id, bool on);
 
 private:
     static long long __stdcall wndProc(void* hwnd, unsigned int msg,
                                        unsigned long long wParam, long long lParam);
-    // Subclase del TreeView del Explorer: pinta los triangulitos de
-    // cascada y gestiona el drag & drop para re-agrupar.
     static long long __stdcall treeSubclassProc(void* hwnd, unsigned int msg,
                                                 unsigned long long wParam,
                                                 long long lParam,
@@ -206,67 +181,50 @@ private:
     void* assetsTree_ = nullptr;  // TreeView (pestana Assets)
     int leftTab_ = 0;             // 0 Properties, 1 Output
     int rightTab_ = 0;            // 0 Explorer, 1 Assets
-    void* root_ = nullptr;   // HTREEITEM de dimension01
+    void* root_ = nullptr;   // HTREEITEM del grupo "Dimensions"
+    const World* world_ = nullptr;
     std::string scriptsRoot_;  // carpeta scripts/ del proyecto
     std::string assetsRoot_;   // carpeta assets/ del proyecto (o raiz)
-    // Arrastre del Explorer: nodo en curso, nodo de destino (resaltado
-    // con TreeView_SelectDropTarget) y si el raton esta enganchado.
+    // Arrastre del Explorer: nodo en curso, nodo de destino y si el raton
+    // esta enganchado.
     HTREEITEM dragItem_ = nullptr;
     HTREEITEM dropTarget_ = nullptr;
     bool dragging_ = false;
     bool visible_ = false;
     bool suppressNotify_ = false;  // syncTreeSelection mueve el caret a mano
-    std::string selectedName_;   // objeto seleccionado ("" si no hay)
-    // Ultimo texto mostrado en cada campo Transform (para restaurarlo si
-    // la edicion no es un numero o no hay objeto seleccionado).
+    InstanceId selectedId_ = kInvalidId;  // objeto seleccionado (0 = ninguno)
+    std::string selectedName_;   // ultimo nombre mostrado (para restaurar)
+    // Ultimo texto mostrado en cada campo Transform.
     std::string fieldText_[9];
-    // Estado de las cascadas del panel: una por categoria (Appearance,
-    // Data, Transform, Pivot, Collision) y, dentro de Transform/Pivot,
-    // una por fila. tri*_ es la zona de click del triangulito (cliente
-    // del panel: x0, y0, x1, y1; vacia si la cascada no se muestra).
     bool catOpen_[7] = {true, true, true, true, true, true, true};
     bool rowOpen_[3] = {false, false, false};
     bool pivotRowOpen_[2] = {false, false};
-    // Estado de los checkboxes (ids 400..403): BS_OWNERDRAW solo, asi que
-    // el estado lo llevamos aqui (BM_GETCHECK requiere BS_CHECKBOX, que
-    // no se puede combinar con BS_OWNERDRAW sin perder los clicks).
     bool checkState_[4] = {};
     int triCat_[7][4] = {};
     int triRow_[3][4] = {};
     int triPivotRow_[2][4] = {};
-    // Ultimo texto de los resumenes "x, y, z" (ids 300..302).
     std::string summaryText_[3];
-    // Resumenes "x, y, z" de las filas del Pivot (ids 310..311).
     std::string pivotSummaryText_[2];
-    // Si es false no se muestran las categorias (seleccion vacia: solo
-    // las Parts tienen propiedades).
     bool showCategories_ = true;
-    // Ultimo texto valido de Reflectance/Transparency (410..411) y de
-    // los campos Pivot (500..505): se restaura si la edicion no es un
-    // numero o no hay objeto seleccionado.
     std::string floatText_[2];
     std::string pivotText_[6];
-    // Fondos de las cajitas (bandas zebra + bordes) en coordenadas de
-    // contenido y desplazamiento vertical del panel con scroll.
     std::vector<RowBand> bands_;
     std::vector<RECT> boxes_;
     int scrollY_ = 0;
     int scrollContent_ = 0;
-    std::function<void(const std::string&)> onSelectionChanged_;
-    std::function<void(const std::string&, const std::string&)> onReparent_;
-    std::function<void(const std::string&, int, float)> onTransformEdited_;
-    std::function<bool(const std::string&, const std::string&)> onNameEdited_;
-    std::function<void(const std::string&, int, bool)> onBoolEdited_;
-    std::function<void(const std::string&, int, float)> onFloatEdited_;
-    std::function<void(const std::string&, int, float)> onPivotEdited_;
-    std::function<void(const std::string&, const std::string&)>
-        onAttributesEdited_;
-    std::function<void(const std::string&, const std::string&)> onTagsEdited_;
-    std::function<void(const std::string&, const std::string&)>
-        onInsertClass_;
+    std::function<void(InstanceId)> onSelectionChanged_;
+    std::function<void(InstanceId, InstanceId)> onReparent_;
+    std::function<void(InstanceId, int, float)> onTransformEdited_;
+    std::function<bool(InstanceId, const std::string&)> onNameEdited_;
+    std::function<void(InstanceId, int, bool)> onBoolEdited_;
+    std::function<void(InstanceId, int, float)> onFloatEdited_;
+    std::function<void(InstanceId, int, float)> onPivotEdited_;
+    std::function<void(InstanceId, const std::string&)> onAttributesEdited_;
+    std::function<void(InstanceId, const std::string&)> onTagsEdited_;
+    std::function<void(InstanceId, const std::string&)> onInsertClass_;
 
     // Abre el selector de clase del boton "+" para el nodo indicado.
-    void openClassPicker(void* treeHwnd, const std::string& parentName);
+    void openClassPicker(void* treeHwnd, InstanceId parentId);
 };
 
 } // namespace sk

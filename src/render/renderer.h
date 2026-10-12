@@ -52,11 +52,16 @@ public:
     bool drawFrame(const Mat4& viewProj, const std::vector<Mat4>& objects,
                    const std::vector<int>& shapes,
                    const std::vector<Mat4>& outlines, const ScreenRect& marquee,
-                   const std::vector<LineVertex>& gizmo);
+                   const std::vector<LineVertex>& gizmo,
+                   bool gizmoChanged = true);
 
     // WM_SIZE de la ventana: llvmpipe no devuelve OUT_OF_DATE al
     // redimensionar, asi que hay que marcar la swapchain a mano.
     void invalidateSwapchain() { swapchainDirty_ = true; }
+
+    // true si el dispositivo elegido es un rasterizador por software
+    // (llvmpipe/lavapipe/SwiftShader): el bucle baja el limite a 30 FPS.
+    bool softwareDevice() const { return softwareDevice_; }
 
 private:
     struct QueueFamilies {
@@ -168,9 +173,19 @@ private:
     static constexpr int kGizmoCapacity = 4096;  // vertices
     VkBuffer gizmoBuffers_[kMaxFramesInFlight] = {};
     VkDeviceMemory gizmoMemories_[kMaxFramesInFlight] = {};
+    // Mapeo persistente de cada buffer del gizmo: se mapea una sola vez
+    // al crearlo y se reescribe directamente (sin map/unmap por frame).
+    void* gizmoMapped_[kMaxFramesInFlight] = {};
+    // Epoca del contenido del gizmo: sube cuando cambian las lineas. Cada
+    // frame en vuelo guarda la epoca con la que se reescribio su buffer;
+    // asi ambos buffers quedan al dia tras un cambio (sin escribir uno
+    // mientras el otro frame aun lo esta leyendo).
+    unsigned long long gizmoEpoch_ = 0;
+    unsigned long long gizmoWrittenEpoch_[kMaxFramesInFlight] = {};
 
     bool swapchainDirty_ = false;
     bool validationEnabled_ = false;
+    bool softwareDevice_ = false;
 };
 
 } // namespace sk

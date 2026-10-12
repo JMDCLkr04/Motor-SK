@@ -110,6 +110,14 @@ bool Window::pumpEvents() {
     return !shouldClose_;
 }
 
+bool Window::waitEvents(unsigned long timeoutMs) {
+    // Bloquea el hilo hasta que haya un mensaje (QS_ALLINPUT incluye
+    // input, post, timers y paint) o venza el timeout. Al volver, el
+    // siguiente pumpEvents drena la cola.
+    MsgWaitForMultipleObjects(0, nullptr, FALSE, timeoutMs, QS_ALLINPUT);
+    return !shouldClose_;
+}
+
 bool Window::keyDown(int vk) const {
     return (GetAsyncKeyState(vk) & 0x8000) != 0;
 }
@@ -239,6 +247,12 @@ long long __stdcall Window::wndProc(void* hwndPtr, unsigned int msg, unsigned lo
             case WM_MOUSEWHEEL: {
                 self->pendingWheel_ += static_cast<float>(GET_WHEEL_DELTA_WPARAM(wParam));
                 return 0;
+            }
+            case WM_PAINT: {
+                // Restaurado/descubierto: pide un repintado del viewport.
+                // DefWindowProc valida la region (abajo).
+                self->repaintRequested_ = true;
+                break;
             }
             case WM_DESTROY: {
                 self->closed_ = true;

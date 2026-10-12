@@ -24,6 +24,31 @@ inline COLORREF boxBackground()    { return RGB(40, 40, 46); }
 inline COLORREF boxBackgroundAlt() { return RGB(47, 47, 54); }
 inline COLORREF boxHeader()        { return RGB(31, 31, 37); }
 
+// --- Widgets del kit (scrollbar/pestanas/popup) -------------------------
+// Riel de la barra de scroll (gris muy oscuro, casi el fondo) y pulgar
+// (gris medio, mas claro al pasar el raton y al arrastrar).
+inline COLORREF scrollRail()       { return RGB(28, 28, 33); }
+inline COLORREF scrollThumb()      { return RGB(78, 78, 86); }
+inline COLORREF scrollThumbHover() { return RGB(112, 112, 122); }
+inline COLORREF scrollThumbDrag()  { return RGB(140, 140, 150); }
+
+// Pestanas del TabStrip: fondo inactivo apenas mas claro que el panel,
+// activo en acento suave, hover intermedio.
+inline COLORREF tabBackground()    { return RGB(30, 30, 36); }
+inline COLORREF tabHover()         { return RGB(46, 46, 54); }
+inline COLORREF tabActive()        { return RGB(52, 52, 60); }
+inline COLORREF tabActiveBar()     { return accent(); }
+inline COLORREF tabText()          { return RGB(176, 176, 184); }
+inline COLORREF tabTextActive()    { return text(); }
+
+// Ventanas emergentes (popup del kit): fondo elevado y borde.
+inline COLORREF popupBackground()  { return RGB(44, 44, 51); }
+inline COLORREF popupBorder()      { return RGB(70, 70, 78); }
+inline HBRUSH popupBackgroundBrush() {
+    static HBRUSH brush = CreateSolidBrush(popupBackground());
+    return brush;
+}
+
 // Pinceles de fondo para clases de ventana y controles.
 inline HBRUSH backgroundBrush() {
     static HBRUSH brush = CreateSolidBrush(background());

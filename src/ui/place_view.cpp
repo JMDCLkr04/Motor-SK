@@ -186,8 +186,9 @@ HTREEITEM addTreeRoot(HWND tree, const char* text) {
     return TreeView_InsertItem(tree, &ins);
 }
 
-// Inserta un nodo hijo (bajo parent) con el texto dado. sceneNode = 1
-// para los nodos que son objetos de la escena (llevan el boton "+").
+// Inserta un nodo hijo (bajo parent) con el texto dado. sceneNode es el
+// InstanceId del objeto (>= 1, lleva el boton "+"); 0 para los grupos
+// sinteticos y las entradas de disco.
 HTREEITEM addTreeChild(HWND tree, HTREEITEM parent, const std::string& text,
                        LPARAM sceneNode = 0) {
     char label[260]{};
@@ -228,22 +229,19 @@ void insertDirRecursive(HWND tree, HTREEITEM parent, const std::string& dir) {
     }
 }
 
-// Busca un nodo por texto recorriendo el arbol completo (por debajo de
-// item en profundidad). Devuelve nullptr si no existe.
-HTREEITEM findTreeItemRec(HWND tree, HTREEITEM item, const char* name) {
+// Busca un nodo por InstanceId recorriendo el arbol completo (por debajo
+// de item en profundidad). Devuelve nullptr si no existe.
+HTREEITEM findTreeItemByIdRec(HWND tree, HTREEITEM item, LPARAM id) {
     while (item) {
-        char text[260]{};
         TVITEMA tvi{};
         tvi.hItem = item;
-        tvi.mask = TVIF_TEXT;
-        tvi.pszText = text;
-        tvi.cchTextMax = static_cast<int>(sizeof(text));
+        tvi.mask = TVIF_PARAM;
         TreeView_GetItem(tree, &tvi);
-        if (std::strcmp(text, name) == 0) return item;
+        if (tvi.lParam == id) return item;
 
         HTREEITEM child = TreeView_GetChild(tree, item);
         if (child) {
-            HTREEITEM hit = findTreeItemRec(tree, child, name);
+            HTREEITEM hit = findTreeItemByIdRec(tree, child, id);
             if (hit) return hit;
         }
         item = TreeView_GetNextSibling(tree, item);
@@ -251,8 +249,22 @@ HTREEITEM findTreeItemRec(HWND tree, HTREEITEM item, const char* name) {
     return nullptr;
 }
 
-HTREEITEM findTreeItem(HWND tree, const char* name) {
-    return findTreeItemRec(tree, TreeView_GetRoot(tree), name);
+HTREEITEM findTreeItemById(HWND tree, LPARAM id) {
+    return findTreeItemByIdRec(tree, TreeView_GetRoot(tree), id);
+}
+
+// Inserta en el arbol el subarbol del World a partir de id (id primero,
+// luego sus hijos en orden). Guarda el InstanceId en lParam.
+void insertWorldSubtree(HWND tree, HTREEITEM parent, const World& world,
+                        InstanceId id, HTREEITEM* last = nullptr) {
+    const Instance* inst = world.find(id);
+    if (!inst) return;
+    HTREEITEM item =
+        addTreeChild(tree, parent, inst->name(), static_cast<LPARAM>(id));
+    if (last) *last = item;
+    for (InstanceId child : inst->children()) {
+        insertWorldSubtree(tree, item, world, child, last);
+    }
 }
 
 // Escribe un campo Transform (ids 200..208) con formato compacto.
@@ -723,16 +735,14 @@ long long __stdcall PlaceView::treeSubclassProc(void* hwndPtr,
     HWND hwnd = static_cast<HWND>(hwndPtr);
     PlaceView* self = reinterpret_cast<PlaceView*>(refData);
 
-    // Lee el texto de un nodo en un buffer (para el drag & drop).
-    auto readNodeText = [](HWND tree, HTREEITEM item, char* out, int size) {
-        out[0] = '\0';
-        if (!item) return;
+    // Lee el InstanceId guardado en un nodo (para el drag & drop).
+    auto readNodeId = [](HWND tree, HTREEITEM item) -> InstanceId {
+        if (!item) return kInvalidId;
         TVITEMA tvi{};
         tvi.hItem = item;
-        tvi.mask = TVIF_TEXT;
-        tvi.pszText = out;
-        tvi.cchTextMax = size;
+        tvi.mask = TVIF_PARAM;
         TreeView_GetItem(tree, &tvi);
+        return static_cast<InstanceId>(tvi.lParam);
     };
 
     switch (msg) {
@@ -777,7 +787,7 @@ long long __stdcall PlaceView::treeSubclassProc(void* hwndPtr,
                     tvi.hItem = item;
                     tvi.mask = TVIF_PARAM;
                     TreeView_GetItem(hwnd, &tvi);
-                    if (tvi.lParam == 1) {
+                    if (tvi.lParam != 0) {
                         RECT r{};
                         if (TreeView_GetItemRect(hwnd, item, &r, TRUE)) {
                             const int cy = (r.top + r.bottom) / 2;
@@ -813,13 +823,11 @@ long long __stdcall PlaceView::treeSubclassProc(void* hwndPtr,
                     if (under) {
                         TVITEMA tvi{};
                         tvi.hItem = under;
-                        tvi.mask = TVIF_PARAM | TVIF_TEXT;
-                        char text[260]{};
-                        tvi.pszText = text;
-                        tvi.cchTextMax = static_cast<int>(sizeof(text));
+                        tvi.mask = TVIF_PARAM;
                         TreeView_GetItem(hwnd, &tvi);
-                        if (tvi.lParam == 1) {
-                            self->openClassPicker(hwnd, text);
+                        if (tvi.lParam != 0) {
+                            self->openClassPicker(
+                                hwnd, static_cast<InstanceId>(tvi.lParam));
                             return 0;
                         }
                     }
@@ -887,26 +895,24 @@ long long __stdcall PlaceView::treeSubclassProc(void* hwndPtr,
                 self->dragItem_ = nullptr;
                 ReleaseCapture();
 
-                char childName[64]{};
-                char parentName[64]{};
+                InstanceId childId = kInvalidId;
+                InstanceId parentId = kInvalidId;
                 if (dragged && target && dragged != target &&
                     dragged != static_cast<HTREEITEM>(self->root_)) {
+                    childId = readNodeId(hwnd, dragged);
                     if (target == static_cast<HTREEITEM>(self->root_)) {
-                        // Suelta sobre dimension01: el arrastrado vuelve
-                        // a la raiz (padre vacio).
-                        readNodeText(hwnd, dragged, childName,
-                                     static_cast<int>(sizeof(childName)));
+                        // Suelta sobre el grupo Dimensions: el arrastrado
+                        // vuelve a la dimension raiz (parent = ninguno).
+                        parentId = kInvalidId;
                     } else {
                         // Soltar X sobre Y: Y queda dentro de X (el
                         // arrastrado absorbe al del cursor).
-                        readNodeText(hwnd, target, childName,
-                                     static_cast<int>(sizeof(childName)));
-                        readNodeText(hwnd, dragged, parentName,
-                                     static_cast<int>(sizeof(parentName)));
+                        childId = readNodeId(hwnd, target);
+                        parentId = readNodeId(hwnd, dragged);
                     }
                 }
-                if (childName[0] && self->onReparent_) {
-                    self->onReparent_(childName, parentName);
+                if (childId != kInvalidId && self->onReparent_) {
+                    self->onReparent_(childId, parentId);
                 }
                 return 0;
             }
@@ -940,27 +946,7 @@ void PlaceView::resize(int width, int height) {
     layoutPanels(width, height);
 }
 
-void PlaceView::addObject(const std::string& name) {
-    addObject(name, "");
-}
-
-void PlaceView::addObject(const std::string& name,
-                          const std::string& parent) {
-    if (!tree_) return;
-    HWND tree = static_cast<HWND>(tree_);
-
-    HTREEITEM hParent = nullptr;
-    if (!parent.empty()) hParent = findTreeItem(tree, parent.c_str());
-    if (!hParent) hParent = findTreeItem(tree, kWorkspaceName);
-    if (!hParent) hParent = findTreeItem(tree, kDimensionName);
-    if (!hParent) hParent = static_cast<HTREEITEM>(root_);
-
-    HTREEITEM item = addTreeChild(tree, hParent, name);
-    if (hParent) TreeView_Expand(tree, hParent, TVE_EXPAND);
-    if (item) TreeView_Select(tree, item, TVGN_CARET);
-}
-
-void PlaceView::rebuildTree(const std::vector<SceneObject>& objects) {
+void PlaceView::rebuildTree(const World& world) {
     if (!tree_) return;
     HWND tree = static_cast<HWND>(tree_);
     clearObjects();
@@ -970,55 +956,30 @@ void PlaceView::rebuildTree(const std::vector<SceneObject>& objects) {
     HTREEITEM scriptsGroup = addTreeRoot(tree, kScriptsGroup);
     const HTREEITEM dimGroup = static_cast<HTREEITEM>(root_);
 
-    std::map<std::string, HTREEITEM> items;
-    std::vector<const SceneObject*> pending;
+    // Dimensiones y sus subarboles (Workspace, Camera, Lighting, Scripts).
     HTREEITEM last = nullptr;
-    auto insertNode = [&](HTREEITEM parent, const std::string& name) {
-        // lParam = 1: es un objeto de escena (lleva boton "+").
-        HTREEITEM item = addTreeChild(tree, parent, name, 1);
-        items[name] = item;
-        last = item;
-    };
-
-    // Dimensiones y demas objetos con parent vacio cuelgan del grupo
-    // Dimensions; el resto, de su padre (varias pasadas por si el del
-    // archivo no precede al hijo).
-    for (const SceneObject& object : objects) {
-        if (object.parent.empty()) {
-            insertNode(dimGroup, object.name);
-        } else {
-            pending.push_back(&object);
-        }
-    }
-    for (size_t guard = 0; guard < pending.size() && !pending.empty();
-         ++guard) {
-        bool progressed = false;
-        for (auto it = pending.begin(); it != pending.end();) {
-            auto parent = items.find((*it)->parent);
-            if (parent != items.end()) {
-                insertNode(parent->second, (*it)->name);
-                it = pending.erase(it);
-                progressed = true;
-            } else {
-                ++it;
-            }
-        }
-        if (!progressed) break;
-    }
-    for (const SceneObject* object : pending) {
-        insertNode(dimGroup, object->name);
+    for (InstanceId dim : world.dimensions()) {
+        insertWorldSubtree(tree, dimGroup, world, dim, &last);
     }
 
-    // Scripts globales del proyecto (Server/Shared/Player/Character).
+    // Scripts globales del proyecto (Server/Shared/Player/Character), con
+    // los archivos de disco colgando de cada uno.
     {
-        static const char* kScriptRoots[] = {"Server", "Shared", "Player",
-                                             "Character"};
-        for (const char* root : kScriptRoots) {
-            HTREEITEM item = addTreeChild(tree, scriptsGroup, root);
-            if (!scriptsRoot_.empty()) {
-                const std::filesystem::path dir =
-                    std::filesystem::path(scriptsRoot_) / root;
-                insertDirRecursive(tree, item, dir.string());
+        const InstanceId scripts = world.globalScripts();
+        if (scripts != kInvalidId) {
+            insertWorldSubtree(tree, scriptsGroup, world, scripts, &last);
+            if (!scriptsRoot_.empty() && world.find(scripts)) {
+                for (InstanceId root : world.find(scripts)->children()) {
+                    const Instance* folder = world.find(root);
+                    if (!folder) continue;
+                    HTREEITEM item = addTreeChild(tree, scriptsGroup,
+                                                  folder->name(),
+                                                  static_cast<LPARAM>(root));
+                    insertDirRecursive(
+                        tree, item,
+                        (std::filesystem::path(scriptsRoot_) / folder->name())
+                            .string());
+                }
             }
         }
     }
@@ -1057,11 +1018,10 @@ void PlaceView::clearObjects() {
     root_ = nullptr;
 }
 
-void PlaceView::renameTreeItem(const std::string& oldName,
-                               const std::string& newName) {
-    if (!tree_) return;
+void PlaceView::renameTreeItem(InstanceId id, const std::string& newName) {
+    if (!tree_ || id == kInvalidId) return;
     HWND tree = static_cast<HWND>(tree_);
-    HTREEITEM item = findTreeItem(tree, oldName.c_str());
+    HTREEITEM item = findTreeItemById(tree, static_cast<LPARAM>(id));
     if (!item) return;
     char label[260]{};
     lstrcpynA(label, newName.c_str(), 260);
@@ -1072,26 +1032,26 @@ void PlaceView::renameTreeItem(const std::string& oldName,
     TreeView_SetItem(tree, &set);
 }
 
-void PlaceView::removeTreeItem(const std::string& name) {
-    if (!tree_) return;
+void PlaceView::removeTreeItem(InstanceId id) {
+    if (!tree_ || id == kInvalidId) return;
     HWND tree = static_cast<HWND>(tree_);
-    HTREEITEM item = findTreeItem(tree, name.c_str());
+    HTREEITEM item = findTreeItemById(tree, static_cast<LPARAM>(id));
     if (item) TreeView_DeleteItem(tree, item);
 }
 
 // Rellena los EDIT de Attributes (700) y Tags (701) con el contenido del
 // objeto (una linea por atributo "nombre | tipo | valor" y por etiqueta).
-void fillAttributesAndTags(HWND props, const SceneObject& object) {
+void fillAttributesAndTags(HWND props, const Instance& object) {
     if (HWND attr = GetDlgItem(props, kIdAttributes)) {
         std::string s;
-        for (const Attribute& a : object.attributes) {
+        for (const Attribute& a : object.getAttributes()) {
             s += a.name + " | " + a.type + " | " + a.value + "\r\n";
         }
         SetWindowTextA(attr, s.c_str());
     }
     if (HWND tags = GetDlgItem(props, kIdTags)) {
         std::string s;
-        for (const std::string& t : object.tags) s += t + "\r\n";
+        for (const std::string& t : object.getTags()) s += t + "\r\n";
         SetWindowTextA(tags, s.c_str());
     }
 }
@@ -1136,43 +1096,51 @@ void PlaceView::setCheck(int id, bool on) {
     }
 }
 
-void PlaceView::showObject(const SceneObject& object, bool relayout) {
+void PlaceView::showObject(const Instance& object, bool relayout) {
     HWND props = static_cast<HWND>(properties_);
     if (!props) return;
     showCategories_ = true;
-    selectedName_ = object.name;
+    selectedId_ = object.id();
+    selectedName_ = object.name();
     if (HWND status = GetDlgItem(props, kIdStatus)) {
-        setWindowTextIfDifferent(status, object.name.c_str());
+        setWindowTextIfDifferent(status, object.name().c_str());
         // Los nodos estructurales (Workspace, Camera, Lighting, Scripts)
         // no se renombran: el campo queda de solo lectura.
-        EnableWindow(status, object.protectedNode ? FALSE : TRUE);
+        EnableWindow(status, object.isProtected() ? FALSE : TRUE);
     }
+    const Vec3 pos = object.position();
+    const Vec3 sca = object.scale();
+    const Vec3 rot = object.rotation();
     for (int axis = 0; axis < 3; ++axis) {
-        setTransformField(props, 200 + axis, (&object.position.x)[axis],
-                          &fieldText_[axis]);
-        setTransformField(props, 203 + axis, (&object.scale.x)[axis],
+        setTransformField(props, 200 + axis, (&pos.x)[axis], &fieldText_[axis]);
+        setTransformField(props, 203 + axis, (&sca.x)[axis],
                           &fieldText_[3 + axis]);
-        setTransformField(props, 206 + axis, (&object.rotation.x)[axis],
+        setTransformField(props, 206 + axis, (&rot.x)[axis],
                           &fieldText_[6 + axis]);
     }
     updateSummaries();
     if (HWND parent = GetDlgItem(props, kIdParentValue)) {
         // El Parent es la raiz dimension01 salvo que el objeto este
         // anidado bajo otro en el Explorer.
-        setWindowTextIfDifferent(
-            parent, object.parent.empty() ? kRootName : object.parent.c_str());
+        const char* parentName = kRootName;
+        if (world_ && object.parentId() != kInvalidId) {
+            if (const Instance* p = world_->find(object.parentId())) {
+                parentName = p->name().c_str();
+            }
+        }
+        setWindowTextIfDifferent(parent, parentName);
     }
 
     if (HWND className = GetDlgItem(props, kIdClassName)) {
-        setWindowTextIfDifferent(className, object.className.c_str());
+        setWindowTextIfDifferent(className, object.className().c_str());
     }
     if (HWND shape = GetDlgItem(props, kIdShape)) {
-        setWindowTextIfDifferent(shape, shapeName(object.shape));
+        setWindowTextIfDifferent(shape, shapeName(object.shape()));
     }
-    setCheck(kIdCastShadow, object.castShadow);
+    setCheck(kIdCastShadow, object.propBool("CastShadow", true));
     if (HWND reflectance = GetDlgItem(props, kIdReflectance)) {
         char buf[32]{};
-        snprintf(buf, sizeof(buf), "%.2f", object.reflectance);
+        snprintf(buf, sizeof(buf), "%.2f", object.propFloat("Reflectance"));
         if (floatText_[0] != buf) {
             floatText_[0] = buf;
             SetWindowTextA(reflectance, buf);
@@ -1180,21 +1148,21 @@ void PlaceView::showObject(const SceneObject& object, bool relayout) {
     }
     if (HWND transparency = GetDlgItem(props, kIdTransparency)) {
         char buf[32]{};
-        snprintf(buf, sizeof(buf), "%.2f", object.transparency);
+        snprintf(buf, sizeof(buf), "%.2f", object.propFloat("Transparency"));
         if (floatText_[1] != buf) {
             floatText_[1] = buf;
             SetWindowTextA(transparency, buf);
         }
     }
-    setCheck(kIdLocked, object.locked);
-    setCheck(kIdCanCollide, object.canCollide);
-    setCheck(kIdAnchored, object.anchored);
+    setCheck(kIdLocked, object.propBool("Locked"));
+    setCheck(kIdCanCollide, object.propBool("CanCollide", true));
+    setCheck(kIdAnchored, object.propBool("Anchored"));
+    const Vec3 pivPos = object.propVec3("PivotPosition");
+    const Vec3 pivRot = object.propVec3("PivotRotation");
     for (int axis = 0; axis < 3; ++axis) {
-        setTransformField(props, kIdPivotBase + axis,
-                          (&object.pivotPosition.x)[axis],
+        setTransformField(props, kIdPivotBase + axis, (&pivPos.x)[axis],
                           &pivotText_[axis]);
-        setTransformField(props, kIdPivotBase + 3 + axis,
-                          (&object.pivotRotation.x)[axis],
+        setTransformField(props, kIdPivotBase + 3 + axis, (&pivRot.x)[axis],
                           &pivotText_[3 + axis]);
     }
     updateSummaries(); // resumenes del Pivot ya con los ejes al dia
@@ -1210,6 +1178,7 @@ void PlaceView::showRoot() {
     HWND props = static_cast<HWND>(properties_);
     if (!props) return;
     showCategories_ = true;
+    selectedId_ = kInvalidId;
     selectedName_.clear();
     if (HWND status = GetDlgItem(props, kIdStatus)) {
         SetWindowTextA(status, "Sin objeto seleccionado");
@@ -1229,6 +1198,7 @@ void PlaceView::showNoSelection() {
     if (!props) return;
     // Sin parte seleccionada no hay categorias que mostrar.
     showCategories_ = false;
+    selectedId_ = kInvalidId;
     selectedName_.clear();
     if (HWND status = GetDlgItem(props, kIdStatus)) {
         SetWindowTextA(status, "Sin objeto seleccionado");
@@ -1245,6 +1215,7 @@ void PlaceView::showMultiple(int count) {
     HWND props = static_cast<HWND>(properties_);
     if (!props) return;
     showCategories_ = true;
+    selectedId_ = kInvalidId;
     selectedName_.clear();
     char text[64]{};
     snprintf(text, sizeof(text), "-%d objetos seleccionados-", count);
@@ -1269,9 +1240,9 @@ void PlaceView::showMultiple(int count) {
     layoutProperties();
 }
 
-void PlaceView::syncTreeSelection(const std::string& primary) {
+void PlaceView::syncTreeSelection(InstanceId primary) {
     if (!tree_) return;
-    if (primary.empty()) {
+    if (primary == kInvalidId) {
         suppressNotify_ = true;
         TreeView_Select(static_cast<HWND>(tree_), nullptr, TVGN_CARET);
         suppressNotify_ = false;
@@ -1279,7 +1250,7 @@ void PlaceView::syncTreeSelection(const std::string& primary) {
     }
     // Busca en todo el arbol (los objetos pueden estar anidados).
     HWND tree = static_cast<HWND>(tree_);
-    HTREEITEM found = findTreeItem(tree, primary.c_str());
+    HTREEITEM found = findTreeItemById(tree, static_cast<LPARAM>(primary));
     if (!found) return;
     // Expande el padre para que el caret quede visible.
     HTREEITEM parent = TreeView_GetParent(tree, found);
@@ -1297,17 +1268,14 @@ void PlaceView::notifySelection() {
     HWND tree = static_cast<HWND>(tree_);
     HTREEITEM item = TreeView_GetSelection(tree);
     if (!item) {
-        onSelectionChanged_(std::string());
+        onSelectionChanged_(kInvalidId);
         return;
     }
-    char text[64]{};
     TVITEMA tvi{};
     tvi.hItem = item;
-    tvi.mask = TVIF_TEXT;
-    tvi.pszText = text;
-    tvi.cchTextMax = static_cast<int>(sizeof(text));
+    tvi.mask = TVIF_PARAM;
     TreeView_GetItem(tree, &tvi);
-    onSelectionChanged_(text);
+    onSelectionChanged_(static_cast<InstanceId>(tvi.lParam));
 }
 
 // Reescribe los resumenes "x, y, z" (ids 300..302) a partir de los
@@ -1669,14 +1637,13 @@ void PlaceView::switchRightTab(int tab) {
     InvalidateRect(static_cast<HWND>(explorer_), nullptr, TRUE);
 }
 
-void PlaceView::openClassPicker(void* treeHwnd, const std::string& parentName) {
+void PlaceView::openClassPicker(void* treeHwnd, InstanceId parentId) {
     HWND owner = GetAncestor(static_cast<HWND>(treeHwnd), GA_ROOT);
     POINT pt{};
     GetCursorPos(&pt);
-    const std::string parent = parentName;
     ClassPicker::open(owner, pt.x, pt.y,
-                      [this, parent](const std::string& className) {
-                          if (onInsertClass_) onInsertClass_(parent, className);
+                      [this, parentId](const std::string& className) {
+                          if (onInsertClass_) onInsertClass_(parentId, className);
                       });
 }
 
@@ -1891,7 +1858,7 @@ long long __stdcall PlaceView::wndProc(void* hwndPtr, unsigned int msg,
             if (id == kIdStatus && code == EN_KILLFOCUS) {
                 HWND field =
                     GetDlgItem(static_cast<HWND>(self->properties_), id);
-                if (!field || self->selectedName_.empty()) return 0;
+                if (!field || self->selectedId_ == kInvalidId) return 0;
                 char text[96]{};
                 GetWindowTextA(field, text, static_cast<int>(sizeof(text)));
                 // Recorte de espacios y caracteres invalidos en nombre
@@ -1911,7 +1878,7 @@ long long __stdcall PlaceView::wndProc(void* hwndPtr, unsigned int msg,
                     return 0; // sin cambios
                 }
                 if (ok && self->onNameEdited_) {
-                    ok = self->onNameEdited_(self->selectedName_, begin);
+                    ok = self->onNameEdited_(self->selectedId_, begin);
                 } else if (ok) {
                     ok = false; // sin dueno: nada que renombrar
                 }
@@ -1936,8 +1903,8 @@ long long __stdcall PlaceView::wndProc(void* hwndPtr, unsigned int msg,
                 char* end = nullptr;
                 const float value = strtof(text, &end);
                 const bool valid = end != text;
-                if (valid && !self->selectedName_.empty()) {
-                    self->onTransformEdited_(self->selectedName_, id, value);
+                if (valid && self->selectedId_ != kInvalidId) {
+                    self->onTransformEdited_(self->selectedId_, id, value);
                 } else if (field) {
                     // No es un numero o no hay objeto: texto anterior.
                     SetWindowTextA(field, self->fieldText_[id - 200].c_str());
@@ -1956,10 +1923,10 @@ long long __stdcall PlaceView::wndProc(void* hwndPtr, unsigned int msg,
                                    static_cast<int>(sizeof(text)));
                 }
                 float values[3]{};
-                if (parseTriple(text, values) && !self->selectedName_.empty()) {
+                if (parseTriple(text, values) && self->selectedId_ != kInvalidId) {
                     const int row = id - kIdSummary;
                     for (int axis = 0; axis < 3; ++axis) {
-                        self->onTransformEdited_(self->selectedName_,
+                        self->onTransformEdited_(self->selectedId_,
                                                  200 + row * 3 + axis,
                                                  values[axis]);
                     }
@@ -1981,10 +1948,10 @@ long long __stdcall PlaceView::wndProc(void* hwndPtr, unsigned int msg,
                                    static_cast<int>(sizeof(text)));
                 }
                 float values[3]{};
-                if (parseTriple(text, values) && !self->selectedName_.empty()) {
+                if (parseTriple(text, values) && self->selectedId_ != kInvalidId) {
                     const int row = id - kIdPivotSummary;
                     for (int axis = 0; axis < 3; ++axis) {
-                        self->onPivotEdited_(self->selectedName_,
+                        self->onPivotEdited_(self->selectedId_,
                                              kIdPivotBase + row * 3 + axis,
                                              values[axis]);
                     }
@@ -2008,8 +1975,8 @@ long long __stdcall PlaceView::wndProc(void* hwndPtr, unsigned int msg,
                                    checkId)) {
                     InvalidateRect(box, nullptr, TRUE);
                 }
-                if (self->onBoolEdited_ && !self->selectedName_.empty()) {
-                    self->onBoolEdited_(self->selectedName_, checkId,
+                if (self->onBoolEdited_ && self->selectedId_ != kInvalidId) {
+                    self->onBoolEdited_(self->selectedId_, checkId,
                                         self->checkState_[idx]);
                 }
             };
@@ -2049,7 +2016,7 @@ long long __stdcall PlaceView::wndProc(void* hwndPtr, unsigned int msg,
                 }
                 char* end = nullptr;
                 float value = strtof(text, &end);
-                if (end != text && !self->selectedName_.empty()) {
+                if (end != text && self->selectedId_ != kInvalidId) {
                     if (value < 0.0f) value = 0.0f;
                     if (value > 1.0f) value = 1.0f;
                     char buf[32]{};
@@ -2057,7 +2024,7 @@ long long __stdcall PlaceView::wndProc(void* hwndPtr, unsigned int msg,
                     if (field) SetWindowTextA(field, buf);
                     self->floatText_[id - kIdReflectance] = buf;
                     if (self->onFloatEdited_) {
-                        self->onFloatEdited_(self->selectedName_, id, value);
+                        self->onFloatEdited_(self->selectedId_, id, value);
                     }
                 } else if (field) {
                     SetWindowTextA(
@@ -2068,7 +2035,7 @@ long long __stdcall PlaceView::wndProc(void* hwndPtr, unsigned int msg,
             }
             // Seccion Attributes (700): parsea el texto y lo aplica.
             if (id == kIdAttributes && code == EN_KILLFOCUS &&
-                !self->selectedName_.empty() && self->onAttributesEdited_) {
+                self->selectedId_ != kInvalidId && self->onAttributesEdited_) {
                 HWND field =
                     GetDlgItem(static_cast<HWND>(self->properties_), id);
                 std::string text;
@@ -2078,12 +2045,12 @@ long long __stdcall PlaceView::wndProc(void* hwndPtr, unsigned int msg,
                     GetWindowTextA(field, text.data(), len + 1);
                     text.resize(std::strlen(text.c_str()));
                 }
-                self->onAttributesEdited_(self->selectedName_, text);
+                self->onAttributesEdited_(self->selectedId_, text);
                 return 0;
             }
             // Seccion Tags (701).
             if (id == kIdTags && code == EN_KILLFOCUS &&
-                !self->selectedName_.empty() && self->onTagsEdited_) {
+                self->selectedId_ != kInvalidId && self->onTagsEdited_) {
                 HWND field =
                     GetDlgItem(static_cast<HWND>(self->properties_), id);
                 std::string text;
@@ -2093,7 +2060,7 @@ long long __stdcall PlaceView::wndProc(void* hwndPtr, unsigned int msg,
                     GetWindowTextA(field, text.data(), len + 1);
                     text.resize(std::strlen(text.c_str()));
                 }
-                self->onTagsEdited_(self->selectedName_, text);
+                self->onTagsEdited_(self->selectedId_, text);
                 return 0;
             }
             // Campos Pivot (500..505): Position/Orientation del origen.
@@ -2111,13 +2078,13 @@ long long __stdcall PlaceView::wndProc(void* hwndPtr, unsigned int msg,
                 }
                 char* end = nullptr;
                 const float value = strtof(text, &end);
-                if (end != text && !self->selectedName_.empty()) {
+                if (end != text && self->selectedId_ != kInvalidId) {
                     char buf[32]{};
                     snprintf(buf, sizeof(buf), "%.3g", value);
                     if (field) SetWindowTextA(field, buf);
                     self->pivotText_[id - kIdPivotBase] = buf;
                     if (self->onPivotEdited_) {
-                        self->onPivotEdited_(self->selectedName_, id, value);
+                        self->onPivotEdited_(self->selectedId_, id, value);
                     }
                 } else if (field) {
                     SetWindowTextA(field,

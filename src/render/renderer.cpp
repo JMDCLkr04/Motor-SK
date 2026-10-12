@@ -106,6 +106,10 @@ void Renderer::shutdown() {
     if (marqueeBuffer_ != VK_NULL_HANDLE) vkDestroyBuffer(device_, marqueeBuffer_, nullptr);
     if (marqueeMemory_ != VK_NULL_HANDLE) vkFreeMemory(device_, marqueeMemory_, nullptr);
     for (int i = 0; i < kMaxFramesInFlight; ++i) {
+        if (gizmoMapped_[i] != nullptr && gizmoMemories_[i] != VK_NULL_HANDLE) {
+            vkUnmapMemory(device_, gizmoMemories_[i]);
+            gizmoMapped_[i] = nullptr;
+        }
         if (gizmoBuffers_[i] != VK_NULL_HANDLE) vkDestroyBuffer(device_, gizmoBuffers_[i], nullptr);
         if (gizmoMemories_[i] != VK_NULL_HANDLE) vkFreeMemory(device_, gizmoMemories_[i], nullptr);
         gizmoBuffers_[i] = VK_NULL_HANDLE;
@@ -317,10 +321,18 @@ bool Renderer::pickPhysicalDevice() {
 
     VkPhysicalDeviceProperties props{};
     vkGetPhysicalDeviceProperties(physicalDevice_, &props);
-    SK_INFO("Dispositivo: %s (api %u.%u.%u)", props.deviceName,
+    // Deteccion de rasterizador por software (para el limite de FPS del
+    // bucle): llvmpipe/lavapipe (Mesa), SwiftShader (Google).
+    const char* name = props.deviceName;
+    softwareDevice_ = std::strstr(name, "llvmpipe") != nullptr ||
+                      std::strstr(name, "lavapipe") != nullptr ||
+                      std::strstr(name, "softpipe") != nullptr ||
+                      std::strstr(name, "SwiftShader") != nullptr;
+    SK_INFO("Dispositivo: %s (api %u.%u.%u)%s", props.deviceName,
             VK_VERSION_MAJOR(props.apiVersion),
             VK_VERSION_MINOR(props.apiVersion),
-            VK_VERSION_PATCH(props.apiVersion));
+            VK_VERSION_PATCH(props.apiVersion),
+            softwareDevice_ ? " [software]" : "");
     return true;
 }
 
@@ -825,11 +837,18 @@ bool Renderer::createOutlineBuffers() {
 }
 
 bool Renderer::createGizmoBuffers() {
-    // Un buffer host-visible por frame en vuelo: en drawFrame se mapea,
-    // se copian las lineas del frame y se desmapea tras el wait del fence.
+    // Un buffer host-visible y visible de forma persistente por frame en
+    // vuelo: se mapea una sola vez aqui y en drawFrame se reescribe solo
+    // cuando las lineas cambian (sin vkMapMemory/vkUnmapMemory por frame).
     for (int i = 0; i < kMaxFramesInFlight; ++i) {
         if (!createVertexBuffer(nullptr, sizeof(LineVertex) * kGizmoCapacity,
                                 &gizmoBuffers_[i], &gizmoMemories_[i])) {
+            return false;
+        }
+        if (vkMapMemory(device_, gizmoMemories_[i], 0,
+                        sizeof(LineVertex) * kGizmoCapacity, 0,
+                        &gizmoMapped_[i]) != VK_SUCCESS) {
+            gizmoMapped_[i] = nullptr;
             return false;
         }
     }
@@ -950,7 +969,8 @@ bool Renderer::drawFrame(const Mat4& viewProj, const std::vector<Mat4>& objects,
                          const std::vector<int>& shapes,
                          const std::vector<Mat4>& outlines,
                          const ScreenRect& marquee,
-                         const std::vector<LineVertex>& gizmo) {
+                         const std::vector<LineVertex>& gizmo,
+                         bool gizmoChanged) {
     if (swapchainDirty_ && !recreateSwapchain()) return false;
     if (swapchain_ == VK_NULL_HANDLE) return true; // ventana minimizada
 
@@ -959,17 +979,18 @@ bool Renderer::drawFrame(const Mat4& viewProj, const std::vector<Mat4>& objects,
     VK_CHECK(vkWaitForFences(device_, 1, &inFlightFences_[frame], VK_TRUE, UINT64_MAX));
 
     // El fence garantiza que la ultima vez que este frame corrio ya leyo
-    // su buffer: se puede reescribir sin barreras ni transiciones.
-    if (!gizmo.empty() && gizmoBuffers_[frame] != VK_NULL_HANDLE) {
+    // su buffer: se puede reescribir sin barreras ni transiciones. Solo
+    // se copian las lineas cuando su contenido cambio; como hay un buffer
+    // por frame en vuelo, se reescribe el de este frame si aun no lleva
+    // la epoca actual (asi ambos buffers quedan al dia sin pisar el otro).
+    if (gizmoChanged) ++gizmoEpoch_;
+    if (!gizmo.empty() && gizmoMapped_[frame] != nullptr &&
+        gizmoWrittenEpoch_[frame] != gizmoEpoch_) {
         const uint32_t count = std::min<uint32_t>(
             static_cast<uint32_t>(gizmo.size()),
             static_cast<uint32_t>(kGizmoCapacity));
-        void* data = nullptr;
-        if (vkMapMemory(device_, gizmoMemories_[frame], 0,
-                        sizeof(LineVertex) * count, 0, &data) == VK_SUCCESS) {
-            std::memcpy(data, gizmo.data(), sizeof(LineVertex) * count);
-            vkUnmapMemory(device_, gizmoMemories_[frame]);
-        }
+        std::memcpy(gizmoMapped_[frame], gizmo.data(), sizeof(LineVertex) * count);
+        gizmoWrittenEpoch_[frame] = gizmoEpoch_;
     }
 
     uint32_t imageIndex = 0;

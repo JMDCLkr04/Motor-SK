@@ -2,6 +2,8 @@
 
 #include <cmath>
 
+#include "../math/math.h"
+
 namespace sk {
 
 namespace {

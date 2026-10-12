@@ -37,9 +37,10 @@ Ejecutable `.exe` con:
        carpetas anidadas, crear script/carpeta, renombrar, borrar con
        confirmacion, raices protegidas, Properties con Nombre/Tipo/Ubicacion
        a la izquierda y Scripts a la derecha; visibles solo en CODE
-- [x] Objetos 3D "Part": escena propia (Scene/SceneObject con posicion,
-       rotacion y escala), el boton Part inserta un cubo sobre la rejilla,
-       Explorer anade y selecciona el nodo, Properties refresca el Transform
+- [x] Objetos 3D "Part": modelo de escena `World`/`Instance` (id estable,
+       jerarquia por id, posicion/rotacion/escala), el boton Part inserta un
+       cubo sobre la rejilla, Explorer anade y selecciona el nodo, Properties
+       refresca el Transform
 - [x] ModelScript: las escenas guardan la asociacion `script` de cada objeto,
         CODE muestra el objeto asociado en su Properties, borrar/renombrar
         scripts remapea (y guarda) las asociaciones y todo persiste con el
@@ -145,6 +146,37 @@ Ejecutable `.exe` con:
         renderer Vulkan que dibuja la escena con la camara del editor; Play
         simula y Run ejecutara los ModelScripts cuando exista el interprete;
         Stop (o cerrar la ventana) la cierra sin afectar al editor
+- [x] Rendimiento: bucle de dibujo **bajo demanda** (solo `drawFrame` cuando
+        cambia algo), espera en `MsgWaitForMultipleObjects` (0 % CPU en
+        reposo), limite 60/30 FPS segun dispositivo (software), caches de
+        `models`/contornos/gizmo por version de contenido, mapeo persistente
+        del buffer del gizmo, guardado de escena **diferido (500 ms) y
+        atomico** (temporal + rename), build Release `/O2 /GL` con LTCG y
+        runtime estatico `/MT` (sin redistributable), y flag `--stats`
+
+## Fase 1.5 — Modelo de datos Instance/World ✅
+
+- [x] `Instance` con id estable (`InstanceId`, nunca se reutilizan), pool en
+      `World` (sustituye `Scene`/`SceneObject`, que se eliminaron), nombres
+      unicos entre hermanos, Attributes y Tags estilo Roblox, y eventos
+      (`onAdded`/`onRemoved`/`onChanged`/`onReparented`)
+- [x] `World`: dimensiones + arbol global Scripts (Server/Shared/Player/
+      Character) + Assets (Models/Meshes/Images/Textures/Audio/Animations/
+      ModuleScripts); protegidos Workspace/Camera/Lighting/Scripts y las raices
+      de Scripts/Assets
+- [x] `ClassRegistry` unico (categorias, clases, propiedades efectivas, valores
+      por defecto, insertables); `class_catalog` pasa a ser su adaptador
+- [x] `CollectionService`: indice tag -> instancias con eventos
+- [x] Comandos con deltas y `UndoStack` (pila de 100, compuestos): crear,
+      renombrar, mover, borrar/restaurar subarbol, clonar, agrupar/desagrupar,
+      insertar subarbol (pegar/importar), propiedades, atributos, tags y
+      transformaciones; un arrastre = un comando
+- [x] Render por lista plana cacheada `World::renderParts()`
+- [x] Escena `version: 2` (`instancia:`/`parent:` por id, solo propiedades no
+      por defecto) con **migracion automatica de v1** (los Part antiguos pasan
+      al Workspace de `dimension01`; no se pierde nada)
+- [x] Tests del modelo (`tests/test_model.cpp`, `motorsk_tests` + CTest): 9
+      pruebas, 76 comprobaciones, 0 fallos
 
 ## Fase 2 — Render básico
 
@@ -156,10 +188,12 @@ Ejecutable `.exe` con:
 ## Fase 3 — Escenas y recursos
 
 - [x] Formato de escena propio (texto, versionado): `escenas/inicio.scene`
-       con `objeto/posicion/rotacion/escala/script/parent`, version: 1,
+       con `instancia/parent/clase/nombre/prop/atributo/tag` por id,
+       **version: 2** (solo propiedades distintas de su valor por defecto),
        tolerante a claves desconocidas; se carga al abrir el proyecto y se
-       guarda en cada mutacion (Part, asociacion, jerarquia,
-       renombrar/borrar scripts)
+       guarda de forma diferida (500 ms) y atomica al editar, y al
+       cerrar/salir/Guardar. Las escenas `version: 1` se migran solas al
+       abrirlas
 - [ ] Carga de recursos (mallas, texturas)
 
 ## Futuro

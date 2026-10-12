@@ -21,7 +21,8 @@ abrir, renombrar y borrar proyectos; al abrir uno entra el **editor 3D**:
   ventana aparte que renderiza la escena con su propio renderer; Run además
   ejecuta los scripts) y pestañas **PLACE / CODE / GUI**.
 - **PLACE**: a la derecha, pestañas **Explorer | Assets**. El **Explorer**
-  jerárquico con dos grupos de nivel superior (**Dimensions** y **Scripts**);
+  jerárquico con tres grupos de nivel superior (**Dimensions**, **Scripts** y
+  **Assets**);
   dentro de la dimensión cuelgan `Workspace`, `Camera`, `Lighting` (con sus
   efectos) y `Scripts` (nodos protegidos: no se renombran ni se borran), y cada
   nodo de escena lleva el botón **`+`** para insertar una clase del catálogo.
@@ -36,8 +37,11 @@ abrir, renombrar y borrar proyectos; al abrir uno entra el **editor 3D**:
   **F1** Referencia de clases, **Supr/Retroceso** borrar, **Esc** volver al panel.
 - **CODE**: organizador de ModelScripts (Server/Shared/Player/Character) con
   editor de scripts y asociación a los objetos de la escena.
-- Todo persiste en la escena del proyecto (`escenas/inicio.scene`, texto
-  versionado con jerarquía `parent:`).
+- El modelo de escena es `World`/`Instance`: instancias con id estable,
+  jerarquía por id (sin nombres duplicados), Attributes y Tags, eventos y
+  deshacer/rehacer por comandos. Todo persiste en la escena del proyecto
+  (`escenas/inicio.scene`, texto **version: 2**); las escenas antiguas
+  (`version: 1`) se migran automáticamente al abrirlas.
 
 | Componente | Versión | Notas |
 |---|---|---|
@@ -66,6 +70,24 @@ Flags para pruebas:
 - `--frames N`: sale tras N frames (smoke test sin interacción)
 - `--proyecto <ruta>`: arranca directamente en la vista 3D de ese proyecto
 - `--play`: abre además la ventana Play/Run al arrancar (pruebas)
+- `--stats`: imprime cada 5 s los frames dibujados y el tiempo medio de frame
+
+## Rendimiento
+
+El bucle principal dibuja **bajo demanda**: solo llama al renderer cuando algo
+cambia (entrada de cámara, escena, selección, herramienta, arrastres, hover del
+gizmo, resize o `WM_PAINT`). En reposo duerme en `MsgWaitForMultipleObjects` sin
+consumir CPU (medido **0 %** con un proyecto abierto y el ratón quieto). Durante
+la interacción limita a **60 FPS** (**30 FPS** si el dispositivo Vulkan es un
+rasterizador por software como llvmpipe/lavapipe). Los `models`/contornos y el
+gizmo se cachean por versión de contenido, el buffer del gizmo usa **mapeo
+persistente** y el guardado de escena es **diferido (500 ms)** con escritura
+**atómica** (temporal + rename).
+
+El build Release usa optimización plena (`/O2 /GL`) con LTCG en el enlace y
+**runtime estático** (`/MT`): el `.exe` no necesita el redistributable de Visual
+C++ (sin `vcruntime140.dll`). No usa `/arch:AVX` para funcionar en CPUs de 2011
+en adelante.
 
 ## Proyectos
 
@@ -91,11 +113,13 @@ Motor-SK/
 │   ├── math/           # vectores y matrices propios (estilo glm)
 │   ├── platform/       # ventana Win32 e input (capa portable)
 │   ├── project/        # modelo de proyecto (proyecto.sk, CRUD de carpetas)
-│   ├── scene/          # cámara libre, escena (objetos), picking, gizmo y snapping
+│   ├── scene/          # modelo (Instance/World/commands/ClassRegistry/
+│   │                   # CollectionService), cámara libre, picking, gizmo, snapping
 │   ├── render/         # renderer Vulkan (swapchain, pipeline, rejilla, contorno)
 │   ├── ui/             # panel de proyectos, banda/menús, intercambio de datos,
 │   │                   # PlaceView (Properties + Explorer) y CodeView (scripts)
 │   └── main.cpp        # bucle principal e integración de todo el editor
+├── tests/              # tests del modelo (motorsk_tests + CTest)
 └── docs/               # documentación
 ```
 

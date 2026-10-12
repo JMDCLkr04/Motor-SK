@@ -23,6 +23,11 @@ public:
     // Procesa mensajes pendientes. Devuelve false cuando se pidió cerrar.
     bool pumpEvents();
 
+    // Espera a que llegue un mensaje o expire el timeout (INFINITE = sin
+    // limite). Devuelve false si se pidió cerrar. En reposo evita que el
+    // hilo gire sobre PeekMessage consumiendo CPU.
+    bool waitEvents(unsigned long timeoutMs);
+
     bool shouldClose() const { return shouldClose_; }
 
     // Ventanas secundarias (Play/Run): al cerrarse no deben terminar la
@@ -67,6 +72,14 @@ public:
         return r;
     }
 
+    // true una sola vez tras un WM_PAINT (restaurado, descubierto, etc.):
+    // obliga a repintar aunque no haya cambiado nada mas.
+    bool consumeRepaintRequested() {
+        bool r = repaintRequested_;
+        repaintRequested_ = false;
+        return r;
+    }
+
     void* nativeHandle() const { return hwnd_; }
 
 private:
@@ -81,6 +94,7 @@ private:
     bool rmbDown_ = false;
     bool lmbDown_ = false;
     bool resized_ = false;
+    bool repaintRequested_ = false;
 
     bool tracking_ = false;
     mutable Vec2 pendingDelta_;

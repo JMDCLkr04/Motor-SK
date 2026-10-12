@@ -2,7 +2,7 @@
 
 #include <vector>
 
-#include "../scene/scene.h"
+#include "../scene/shape.h"
 
 namespace sk {
 

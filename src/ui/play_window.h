@@ -4,7 +4,7 @@
 
 namespace sk {
 
-class Scene;
+class World;
 class Camera;
 class Window;
 class Renderer;
@@ -25,13 +25,13 @@ public:
     PlayWindow& operator=(const PlayWindow&) = delete;
 
     // Abre la ventana y arranca su renderer. runScripts elige el modo.
-    bool open(const Scene& scene, const Camera& camera, bool runScripts);
+    bool open(const World& world, const Camera& camera, bool runScripts);
     void close();
     bool active() const { return active_; }
 
     // Dibuja un frame de la escena (se llama desde el bucle principal
     // mientras active()).
-    void renderFrame(const Scene& scene, const Camera& camera);
+    void renderFrame(const World& world, const Camera& camera);
 
 private:
     std::unique_ptr<Window> window_;

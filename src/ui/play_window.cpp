@@ -6,7 +6,7 @@
 #include "../platform/window.h"
 #include "../render/renderer.h"
 #include "../scene/camera.h"
-#include "../scene/scene.h"
+#include "../scene/world.h"
 
 namespace sk {
 namespace ui {
@@ -15,9 +15,9 @@ PlayWindow::PlayWindow() = default;
 
 PlayWindow::~PlayWindow() { close(); }
 
-bool PlayWindow::open(const Scene& scene, const Camera& camera,
+bool PlayWindow::open(const World& world, const Camera& camera,
                       bool runScripts) {
-    (void)scene;
+    (void)world;
     (void)camera;
     if (active_) return true;
 
@@ -59,7 +59,7 @@ void PlayWindow::close() {
     run_ = false;
 }
 
-void PlayWindow::renderFrame(const Scene& scene, const Camera& camera) {
+void PlayWindow::renderFrame(const World& world, const Camera& camera) {
     if (!active_ || !window_ || !renderer_) return;
     if (window_->closed()) {
         close();
@@ -77,12 +77,12 @@ void PlayWindow::renderFrame(const Scene& scene, const Camera& camera) {
 
     std::vector<Mat4> models;
     std::vector<int> shapes;
-    models.reserve(scene.objects().size());
-    shapes.reserve(scene.objects().size());
-    for (const SceneObject& object : scene.objects()) {
-        if (!isRenderableClass(object.className)) continue;
-        models.push_back(object.modelMatrix());
-        shapes.push_back(static_cast<int>(object.shape));
+    const std::vector<RenderPart>& parts = world.renderParts();
+    models.reserve(parts.size());
+    shapes.reserve(parts.size());
+    for (const RenderPart& part : parts) {
+        models.push_back(part.model);
+        shapes.push_back(part.shape);
     }
 
     if (!renderer_->drawFrame(viewProj, models, shapes, {}, {}, {})) {

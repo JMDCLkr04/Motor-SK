@@ -2,3 +2,5 @@
 // rc.exe busca el archivo en el directorio del .rc y en los /I del target
 // (CMake pasa target_include_directories al compilador de recursos).
 1 ICON "logo.ico"
+
+101 RCDATA "src\\ui\\kit\\icons_atlas.png"

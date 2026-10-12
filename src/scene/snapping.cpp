@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <cmath>
 
-#include "scene.h"
+#include "world.h"
 
 namespace sk {
 
@@ -113,13 +113,13 @@ float snapTo(float value, float grid) {
 
 } // namespace
 
-void computeSurfaceDrag(const Scene& scene, const Ray& ray0, const Ray& ray1,
-                        const std::vector<std::string>& dragged, int leadIndex,
+void computeSurfaceDrag(const World& world, const Ray& ray0, const Ray& ray1,
+                        const std::vector<InstanceId>& dragged, int leadIndex,
                         const Vec3& grabOffset,
                         const std::vector<DragPose>& startPose,
                         bool alignSurface, float grid, DragResult& out) {
     out.onSurface = false;
-    out.surfaceName.clear();
+    out.surfaceId = kInvalidId;
     out.surfaceNormal = {};
     out.groundHit = false;
     out.poses = startPose;
@@ -128,29 +128,30 @@ void computeSurfaceDrag(const Scene& scene, const Ray& ray0, const Ray& ray1,
         leadIndex >= static_cast<int>(dragged.size())) {
         return;
     }
-    const SceneObject* lead = scene.findByName(dragged[leadIndex]);
+    const Instance* lead = world.find(dragged[leadIndex]);
     if (!lead) return;
+    const Vec3 leadScale = lead->scale();
 
     const Mat4 R0 = rotXYZ(startPose[leadIndex].rotation);
     Mat4 Rnew = R0;
     Vec3 leadPos = startPose[leadIndex].position;
 
     // Cara de otro parte bajo el puntero (los arrastrados se ignoran).
-    std::string targetName;
+    InstanceId targetId = kInvalidId;
     Vec3 hitPoint{};
     Vec3 hitNormal{};
-    const SceneObject* target = nullptr;
-    if (pickObjectFace(scene, ray1, dragged, targetName, hitPoint, hitNormal)) {
-        target = scene.findByName(targetName);
+    const Instance* target = nullptr;
+    if (pickObjectFace(world, ray1, dragged, targetId, hitPoint, hitNormal)) {
+        target = world.find(targetId);
     }
 
     if (target) {
         // --- Surface snapping: la caja del lead se apoya en la cara ---
         out.onSurface = true;
-        out.surfaceName = target->name;
+        out.surfaceId = target->id();
         out.surfaceNormal = hitNormal;
 
-        const Mat4 Rt = rotXYZ(target->rotation);
+        const Mat4 Rt = rotXYZ(target->rotation());
         // La cara golpeada, en coordenadas locales del destino: el eje
         // dominante de Rt^T * n (su normal local es +-eje).
         const Vec3 localN = transformDir(rotTranspose(Rt), hitNormal);
@@ -166,9 +167,6 @@ void computeSurfaceDrag(const Scene& scene, const Ray& ray0, const Ray& ray1,
         const float targetSign = (&localN.x)[targetAxis] >= 0.0f ? 1.0f : -1.0f;
 
         if (alignSurface) {
-            // Cara del lead cuya normal en mundo mira mas al revés que la
-            // del destino: esa es la que se apoya. Despues de alinear,
-            // su normal en mundo sera exactamente -hitNormal.
             int leadAxis = 0;
             float leadSign = 1.0f;
             float bestDot = 1e9f;
@@ -184,31 +182,22 @@ void computeSurfaceDrag(const Scene& scene, const Ray& ray0, const Ray& ray1,
                     }
                 }
             }
-            // R' = Rt * M, con M llevando la cara del lead a la cara
-            // interna del destino (rotacion minima: conserva el resto).
             Rnew = Rt * rotationBetween(axisVec(leadAxis) * leadSign,
                                         axisVec(targetAxis) * (-targetSign));
         }
 
-        // Tangentes de la cara: las otras dos columnas de Rt (ortogonales
-        // a la normal, definen el plano de la cara).
         const Vec3 t1 = transformDir(Rt, axisVec((targetAxis + 1) % 3));
         const Vec3 t2 = transformDir(Rt, axisVec((targetAxis + 2) % 3));
 
-        // La cara de contacto queda a ras (soporte en la direccion de la
-        // normal) y el punto de agarre cae sobre el punto de golpe.
-        const float height = supportAlong(lead->scale, Rnew, hitNormal);
+        const float height = supportAlong(leadScale, Rnew, hitNormal);
         const Mat4 delta = Rnew * rotTranspose(R0);
         const Vec3 grab = transformDir(delta, grabOffset);
         Vec3 pos = hitPoint + hitNormal * height -
                    (grab - hitNormal * dot(grab, hitNormal));
 
-        // Rejilla en el plano de la cara relativa al centro del destino
-        // (asi las caras siguen alineadas aunque el destino este fuera
-        // de la rejilla de mundo). La normal no se toca: el ras es exacto.
         if (grid > 0.0f) {
-            const Vec3 rel = pos - target->position;
-            pos = target->position + t1 * snapTo(dot(rel, t1), grid) +
+            const Vec3 rel = pos - target->position();
+            pos = target->position() + t1 * snapTo(dot(rel, t1), grid) +
                   t2 * snapTo(dot(rel, t2), grid) +
                   hitNormal * dot(rel, hitNormal);
         }
@@ -226,9 +215,6 @@ void computeSurfaceDrag(const Scene& scene, const Ray& ray0, const Ray& ray1,
         }
         out.groundHit = grounded;
         if (!grounded) {
-            // Mirando al cielo: el punto de agarre sigue al puntero en
-            // el plano de camara que pasa por el (fallback para que el
-            // parte no se quede congelado).
             const Vec3 planeN = normalize(ray0.dir);
             const Vec3 anchor = startPose[leadIndex].position + grabOffset;
             point = anchor;
@@ -238,10 +224,8 @@ void computeSurfaceDrag(const Scene& scene, const Ray& ray0, const Ray& ray1,
                 if (t > 0.0f) point = ray1.origin + ray1.dir * t;
             }
         }
-        // No hay cara a la que alinear: la rotacion no cambia y la caja
-        // inferior queda apoyada en el suelo.
         const float height =
-            supportAlong(lead->scale, Rnew, Vec3{0.0f, 1.0f, 0.0f});
+            supportAlong(leadScale, Rnew, Vec3{0.0f, 1.0f, 0.0f});
         Vec3 pos = point - grabOffset;
         pos.y = height;
         if (grid > 0.0f) {
