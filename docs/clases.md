@@ -3,7 +3,7 @@
 Este documento describe el **catalogo de clases** del motor y el **valor por
 defecto de cada propiedad**. La fuente unica de datos es el codigo:
 
-- `src/scene/class_catalog.h` / `src/scene/class_catalog.cpp`
+- `src/scene/class_registry.h` / `src/scene/class_registry.cpp`
 
 Cualquier cambio en las clases (nombre, categoria, icono, descripcion,
 propiedades o valores por defecto) se hace **solo** ahi, y se refleja
@@ -78,7 +78,7 @@ editable, y los **efectos** de `Lighting` se pueden borrar y reinsertar.
 Cada propiedad tiene `nombre`, `tipo` (`text`, `number`, `bool`, `Vector3`,
 `color`, `enum`, `object`), `valor por defecto` y `descripcion`. Estas son las
 fichas completas ya definidas (el resto se completara igual, en
-`class_catalog.cpp`):
+`class_registry.cpp`):
 
 ### Part
 

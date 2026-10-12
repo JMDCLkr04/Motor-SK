@@ -1,0 +1,156 @@
+# Arquitectura
+
+Documento de referencia sobre la estructura interna del motor, los flujos
+principales (escena -> UI/render) y cómo probarlo. Complementa a
+[README.md](../README.md) (uso) y a [roadmap.md](roadmap.md) (fases) y a
+[clases.md](clases.md) (catálogo de clases).
+
+## Módulos
+
+El código vive en `src/` agrupado por capas. La regla general es que cada
+capa depende solo de las de abajo:
+
+```
+src/main.cpp
+   ├── ui/        (paneles Win32 + kit de widgets propio en ui/kit/)
+   │     ├── place_view  (Properties | Explorer | Assets)
+   │     ├── docs_view   (Referencia de clases, lee ClassRegistry)
+   │     ├── code_view   (organizador de scripts)
+   │     ├── projects_panel, play_window ...
+   │     └── kit/        (widgets GDI propios: ver más abajo)
+   ├── scene/     (World/Instance, commands, ClassRegistry, cámara, picking,
+   │               gizmo, snapping, CollectionService)
+   ├── render/    (renderer Vulkan: swapchain, pipeline, rejilla, contorno)
+   ├── project/   (proyecto.sk, CRUD de carpetas de scripts)
+   ├── platform/  (ventana Win32 e input, capa portable)
+   ├── core/      (logging + config de %APPDATA%)
+   └── math/      (Vec2/Vec3/Mat4 propias, estilo glm)
+```
+
+`src/scene/` es la única capa con **tests unitarios** (`tests/test_model.cpp`);
+el resto es UI/render y se prueba con smoke tests (ver "Cómo probar").
+
+## Modelo de datos
+
+- **`Instance`** (`instance.h`): un nodo con `id` estable (los ids no se
+  reutilizan), `parentId`, posición dentro de la lista de hermanos, nombre,
+  `className`, propiedades tipadas, Attributes y Tags.
+- **`World`** (`world.h/.cpp`): árbol de instancias. Estructura por defecto
+  (idempotente, `ensureStructure()`): una `dimension01` con `Workspace`,
+  `Camera`, `Lighting` (con sus efectos) y `Scripts`, más el árbol global
+  `Scripts` (Server/Shared/Player/Character) y `Assets`. Los nodos
+  estructurales están **protegidos** (no se renombran, no se borran, no se
+  mueven).
+- **Índice de nombres**: `World` mantiene `childNames_[(padre, nombre)] -> id`
+  para que `findChild` y `uniqueName` sean O(1) amortizado (antes eran O(n)
+  con un bucle por alta, O(n³) al poblar una escena grande). El índice se
+  actualiza en todas las mutaciones (`create`, `adoptChild`, `detachChild`,
+  `remove`, `rename`, `reparent`, `restoreInstances`) y se reconstruye al
+  cargar. `nameCounters_` guarda el siguiente sufijo a probar por
+  (padre, base), evitando recontar desde 1.
+- **Eventos**: `onAdded`, `onRemoved`, `onChanged`, `onReparented` (callbacks
+  `std::function` registrados por la UI). Las mutaciones de alto nivel los
+  emiten; las de bajo nivel (`insertInstance`, `adoptChild`,
+  `setNameIndexed`, `eraseInstance`, ...) no, porque son para undo/redo y
+  deserialización, que emiten al final.
+- **Undo/redo**: `commands.h/.cpp` (patrón comando con `UndoStack` y
+  `CmdPtr`). Cada operación es un comando con `apply()/undo()`; el undo
+  captura y restaura subárboles mediante `captureSubtree`.
+- **ClassRegistry** (`class_registry.h/.cpp`): catálogo único de clases y
+  categorías (sustituyó a `class_catalog.{h,cpp}`, eliminado). Lo usan la
+  Referencia (F1), el botón `+` del Explorer y el picker de inserción, de
+  modo que todos muestran exactamente la misma lista.
+- **CollectionService** (`collection_service.h/.cpp`): índice por clase y por
+  tags de todos los nodos; se mantiene con la estructura y se reconstruye con
+  `rebuildCollection()`.
+
+## Flujo escena -> UI/render
+
+`main.cpp` registra los callbacks del `World` al abrir un proyecto:
+
+```
+World.create(className, parent)
+   └─ emitAdded(id, parent)
+        ├─ ui: Explorer inserta/expande el nodo y lo selecciona
+        ├─ ui: Properties refresca el formulario
+        └─ World marca renderDirty_ (invalidateRender) y pide repintado
+   └─ renderParts() devuelve la lista plana de Part (cadena cacheada)
+        └─ renderer dibuja los cubos/contornos la próxima vez que aplica
+```
+
+`renderParts()` regenera una lista plana de `RenderPart` (matriz modelo, forma
+e id) solo cuando `renderDirty_`; los eventos la invalidan.
+
+## Bucle de render bajo demanda
+
+El bucle de `main.cpp`:
+
+1. Duerme en `MsgWaitForMultipleObjects` hasta que llega un mensaje de
+   entrada, un `WM_PAINT` o un evento que cambie la escena.
+2. Al despertar, dibuja **solo si hace falta** (entrada de cámara, cambio de
+   escena, selección, herramienta, arrastre, hover del gizmo, resize).
+3. Limita a **60 FPS** en GPU, **30 FPS** si el device es un rasterizador por
+   software (lavapipe/llvmpipe).
+
+El guardado de escena es **diferido (500 ms)** tras el último cambio y con
+escritura **atómica**: se escribe `<escena>.scene.tmp` y se hace
+`std::filesystem::rename` sobre el destino (si al cargar no existe el archivo
+principal se promociona el `.tmp`). Esto evita escenas corruptas si la
+aplicación se cierra a mitad de escritura.
+
+## Kit de widgets (`ui/kit/`)
+
+Controles de GDI propios para sustituir gradualmente los nativos
+(TreeView/ListView de comctl32) y garantizar el mismo tema oscuro en toda la
+UI:
+
+- `paint_buffer` (backing store + doble buffer para parpadeo cero),
+  `theme.h` (tokens de color/medida), `icon_atlas` + `icons.h`
+  (pipeline `tools/make_icons.py` -> PNG/atlas + nombre por icono),
+  `scroll_bar`, `tab_strip`, `disclosure` (plegable), `place_popup`
+  (menú contextual del `+`), `tree_widget`, `list_widget`, `demo_window`
+  (muestra el kit, se abre con `--ui-demo`).
+
+Estado: `TreeWidget`/`ListWidget` compilan como scaffolds; el Explorer y la
+lista de la Referencia siguen usando los controles nativos hasta el portado.
+
+## Cómo probar
+
+Tests del modelo (asserts sin framework; salen con un contador de
+comprobaciones y de fallos):
+
+```bat
+call build.bat
+build\Release\motorsk_tests.exe
+```
+
+Incluyen perfiles de rendimiento del índice de nombres (5000 altas en el
+mismo padre < 150 ms, clonar/insertar 2000 nodos < 100 ms) y un **fuzz** de
+4000 operaciones aleatorias (create/reparent/remove/rename) que comprueba los
+invariantes (padre<->hijos consistente, nombres únicos entre hermanos). Los
+límites de tiempo solo se exigen en compilación optimizada (`Release` /O2);
+bajo `_DEBUG` o ASan la instrumentación los hace no representativos y se mide
+sin afirmar.
+
+Smoke test del editor:
+
+```bat
+build\Release\MotorSK.exe --frames 30 > log.txt 2>&1
+build\Release\MotorSK.exe --stats   # cada 5 s: frames y media del frame
+build\Release\MotorSK.exe --proyecto <ruta> --play
+build\Release\MotorSK.exe --ui-demo  # abre la demostración del kit de UI
+```
+
+Build con sanitizadores (AddressSanitizer del MSVC) para detectar errores de
+memoria en el modelo; se construye en `build-asan` (runtime dinámico, sin
+optimizar):
+
+```bat
+cmake -S . -B build-asan -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL ^
+      -DCMAKE_CXX_FLAGS="/fsanitize=address /Zi" -DCMAKE_EXE_LINKER_FLAGS="/DEBUG"
+cmake --build build-asan --config Debug --target motorsk_tests
+build-asan\Debug\motorsk_tests.exe
+```
+
+`build-asan/` está en `.gitignore`; los artefactos de build nunca se
+versionan.

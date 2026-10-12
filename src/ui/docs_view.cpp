@@ -1,4 +1,4 @@
-﻿#include "docs_view.h"
+#include "docs_view.h"
 
 #include <windows.h>
 #include <commctrl.h>
@@ -6,7 +6,7 @@
 #include <cstring>
 
 #include "../core/log.h"
-#include "../scene/class_catalog.h"
+#include "../scene/class_registry.h"
 #include "theme.h"
 #include "workspace_tabs.h"
 
@@ -22,234 +22,10 @@ enum ControlId {
     kIdDivider = 3,
 };
 
-// Categorias de clases (19). "icon" es el emoji provisional que se pinta
-// como logo de cada clase; "name" es el nombre en ASCII (sin acentos, como
-// el resto de la interfaz).
-struct Category {
-    const wchar_t* icon;
-    const char* name;
-};
-
-const Category kCategories[] = {
-    {L"\U0001F5C2", "Proyecto y organizacion"},   // 0  cajas
-    {L"\U0001F4A1", "Iluminacion y ambiente"},    // 1  bombilla
-    {L"\U0001F505", "Fuentes de luz"},            // 2  luz baja
-    {L"\u2699", "Fisica y articulaciones"},       // 3  engranaje
-    {L"\u2728", "Particulas y efectos"},          // 4  destellos
-    {L"\U0001F5B1", "Interaccion"},               // 5  raton
-    {L"\U0001F3AC", "Animaciones"},               // 6  claqueta
-    {L"\U0001F50A", "Audio"},                     // 7  altavoz
-    {L"\U0001F3AE", "Controles de entrada"},      // 8  mando
-    {L"\U0001F4E1", "Comunicacion"},              // 9  antena
-    {L"\U0001F4DC", "Scripts"},                   // 10 pergamino
-    {L"\u23F0", "Tiempo"},                        // 11 despertador
-    {L"\U0001F4E6", "Gestion de recursos"},       // 12 paquete
-    {L"\U0001F41E", "Diagnostico"},               // 13 bicho
-    {L"\U0001F4BE", "Persistencia"},              // 14 disco
-    {L"\U0001F6E0", "Edicion en ejecucion"},      // 15 herramientas
-    {L"\U0001F5BC", "Interfaz (GUI)"},            // 16 cuadro
-    {L"\U0001F300", "Interpolacion"},             // 17 ciclo
-    {L"\U0001F522", "Objetos de valor"},          // 18 numeros
-};
-
-constexpr int kCategoryCount =
-    static_cast<int>(sizeof(kCategories) / sizeof(kCategories[0]));
-
-// Clase del motor: categoria (indice en kCategories), nombre y descripcion
-// corta.
-struct ClassDef {
-    int cat;
-    const char* name;
-    const char* shortDesc;
-};
-
-const ClassDef kClasses[] = {
-    // 0. Proyecto y organizacion.
-    {0, "Dimension", "Dimension independiente con sus objetos, config y scripts."},
-    {0, "Workspace", "Contiene los objetos del mundo de una dimension."},
-    {0, "Part", "Objeto 3D basico con forma, transformacion y colision."},
-    {0, "Model", "Agrupa objetos para manipularlos como una unidad."},
-    {0, "Folder", "Organiza objetos jerarquicamente."},
-    {0, "MeshPart", "Geometria basada en una malla 3D."},
-    {0, "Decal", "Aplica una imagen sobre una superficie."},
-    {0, "Texture", "Repite una imagen en mosaico sobre una superficie."},
-    {0, "Color", "Color aplicable a un objeto o a parte de su geometria."},
-    {0, "Accessory", "Accesorio configurable."},
-    {0, "Attachment", "Punto de referencia para uniones y efectos."},
-    {0, "Camera", "Vista de juego de una dimension."},
-    {0, "CollectionService", "Busca objetos por etiqueta y avisa de cambios."},
-
-    // 1. Iluminacion y ambiente.
-    {1, "Lighting", "Configura la iluminacion y el ambiente de una dimension."},
-    {1, "Sky", "Define la apariencia del cielo."},
-    {1, "Atmosphere", "Dispersion atmosferica y niebla."},
-    {1, "Clouds", "Representa y configura las nubes."},
-    {1, "BloomEffect", "Resplandor alrededor de zonas luminosas."},
-    {1, "BlurEffect", "Aplica desenfoque."},
-    {1, "ColorCorrectionEffect", "Modifica color, contraste y saturacion."},
-    {1, "ColorGradingEffect", "Aplica gradacion de color."},
-    {1, "DepthOfFieldEffect", "Desenfoca segun la distancia a la camara."},
-    {1, "SunRaysEffect", "Simula rayos solares."},
-
-    // 2. Fuentes de luz.
-    {2, "Light", "Fuente de luz; Type: Point, Spot o Surface."},
-
-    // 3. Fisica, movimiento y articulaciones.
-    {3, "AlignOrientation", "Controla o alinea la orientacion de un objeto."},
-    {3, "AngularVelocity", "Controla la velocidad angular."},
-    {3, "LinearVelocity", "Controla la velocidad lineal."},
-    {3, "VectorForce", "Aplica una fuerza vectorial."},
-    {3, "BallSocketConstraint", "Rotacion en varias direcciones entre cuerpos."},
-    {3, "HingeConstraint", "Permite rotacion alrededor de un eje."},
-    {3, "NoCollisionConstraint", "Evita la colision entre dos objetos."},
-    {3, "Weld", "Conecta rigidamente dos objetos."},
-    {3, "WeldConstraint", "Mantiene dos objetos unidos sin movimiento."},
-    {3, "RopeConstraint", "Cuerda que limita la separacion entre puntos."},
-    {3, "AirController", "Gestiona el control del movimiento en el aire."},
-    {3, "Humanoid", "Controlador de personaje con vida y movimiento."},
-    {3, "Seat", "Permite que un personaje se siente."},
-    {3, "SpawnLocation", "Define un punto de aparicion."},
-    {3, "Pathfinding", "Navegacion y busqueda de rutas."},
-
-    // 4. Particulas y efectos.
-    {4, "ParticleEmitter", "Genera particulas configurables."},
-    {4, "Trail", "Rastro visual detras de un objeto en movimiento."},
-    {4, "Smoke", "Genera humo."},
-    {4, "Fire", "Efecto visual de fuego."},
-    {4, "Sparkles", "Genera destellos."},
-    {4, "Explosion", "Explosion visual con efectos fisicos."},
-    {4, "Highlight", "Resalta visualmente un objeto."},
-    {4, "Beam", "Efecto visual entre dos puntos."},
-
-    // 5. Interaccion.
-    {5, "ClickDetector", "Detecta clics sobre un objeto."},
-    {5, "DragDetector", "Permite arrastrar objetos."},
-    {5, "ProximityPrompt", "Interacciones contextuales al acercarse."},
-    {5, "Dialog", "Dialogo interactivo."},
-    {5, "DialogChoice", "Opcion seleccionable de un dialogo."},
-
-    // 6. Animaciones.
-    {6, "Animation", "Recurso de animacion."},
-    {6, "AnimationConstraint", "Restricciones del sistema de animacion."},
-    {6, "Bone", "Hueso de una estructura articulada."},
-    {6, "Motor6D", "Conecta partes articuladas y controla su transformacion."},
-    {6, "Keyframe", "Fotograma clave."},
-    {6, "KeyframeSequence", "Secuencia de fotogramas clave."},
-    {6, "EulerRotationCurve", "Curva de rotacion con angulos de Euler."},
-    {6, "RotationCurve", "Curva de orientacion."},
-    {6, "Vector3Curve", "Curva de valores vectoriales."},
-    {6, "Animator", "Coordina la reproduccion de animaciones."},
-
-    // 7. Audio.
-    {7, "Sound", "Reproduce musica, voces y efectos."},
-    {7, "SoundEffect", "Clase base abstracta de efectos de audio."},
-    {7, "SoundGroup", "Agrupa sonidos con configuracion compartida."},
-    {7, "SoundService", "Configuracion general y reproduccion de audio."},
-    {7, "ChorusSoundEffect", "Efecto de coro."},
-    {7, "CompressorSoundEffect", "Comprime el rango dinamico."},
-    {7, "DistortionSoundEffect", "Anade distorsion o saturacion."},
-    {7, "EchoSoundEffect", "Genera repeticiones de sonido."},
-    {7, "EqualizerSoundEffect", "Modifica bandas de frecuencia."},
-    {7, "FlangeSoundEffect", "Efecto de modulacion tipo flanger."},
-    {7, "PitchShiftSoundEffect", "Modifica el tono del sonido."},
-    {7, "ReverbSoundEffect", "Simula la reverberacion de un espacio."},
-    {7, "TremoloSoundEffect", "Modula periodicamente el volumen."},
-    {7, "Wire", "Conecta componentes de una cadena de audio."},
-
-    // 8. Controles de entrada.
-    {8, "Mouse", "Gestiona las entradas del raton."},
-    {8, "KeyboardControl", "Control configurable asociado a una tecla."},
-    {8, "GamepadControl", "Control configurable de mando."},
-    {8, "TouchControl", "Control configurable para pantallas tactiles."},
-
-    // 9. Comunicacion entre componentes.
-    {9, "BindableEvent", "Eventos para componentes del mismo contexto."},
-    {9, "BindableFunction", "Llama a una funcion de otro componente."},
-    {9, "RemoteEvent", "Eventos entre contextos separados."},
-    {9, "RemoteFunction", "Llamadas con respuesta entre contextos separados."},
-
-    // 10. Scripts y actualizacion.
-    {10, "Script", "Codigo que se ejecuta segun su ubicacion."},
-    {10, "LocalScript", "Codigo que se ejecuta del lado del jugador."},
-    {10, "ModuleScript", "Codigo reutilizable que otros scripts importan."},
-    {10, "Heartbeat", "Evento de actualizacion para los scripts."},
-    {10, "Stepped", "Evento de la actualizacion de la simulacion."},
-
-    // 11. Tiempo.
-    {11, "ClockTime", "Consulta y manipula el tiempo de un ciclo temporal."},
-
-    // 12. Gestion de recursos.
-    {12, "Debris", "Programa la eliminacion de objetos tras un tiempo."},
-    {12, "CacheService", "Gestiona recursos almacenados temporalmente."},
-    {12, "AssetService", "Administra recursos y operaciones con assets."},
-    {12, "ContentProvider", "Gestiona la precarga de recursos."},
-
-    // 13. Diagnostico y depuracion.
-    {13, "LogService", "Centraliza registros, avisos y mensajes."},
-    {13, "ErrorReporter", "Recopila informacion sobre errores."},
-    {13, "Stats", "Estadisticas de rendimiento y recursos."},
-    {13, "DebugSettings", "Opciones de configuracion para depuracion."},
-
-    // 14. Persistencia y guardado local.
-    {14, "DataStore", "Almacena y recupera datos persistentes."},
-    {14, "DataStoreService", "Administra los almacenes de datos."},
-    {14, "JSONService", "Convierte datos a JSON y desde JSON."},
-    {14, "SaveService", "Coordina el guardado y la carga."},
-
-    // 15. Edicion de recursos en ejecucion.
-    {15, "EditableImage", "Modifica imagenes durante la ejecucion."},
-    {15, "EditableMesh", "Crea o modifica geometria durante la ejecucion."},
-
-    // 16. Interfaz grafica (GUI).
-    {16, "GuiObject", "Clase base abstracta de elementos visuales."},
-    {16, "ScreenGui", "Interfaz 2D que se muestra en pantalla."},
-    {16, "Frame", "Contenedor para organizar componentes."},
-    {16, "CanvasGroup", "Agrupa elementos con propiedades compartidas."},
-    {16, "ScrollingFrame", "Contenedor con desplazamiento."},
-    {16, "ImageLabel", "Muestra una imagen."},
-    {16, "ImageButton", "Muestra una imagen y permite interaccion."},
-    {16, "TextLabel", "Muestra texto."},
-    {16, "TextButton", "Boton con texto."},
-    {16, "TextBox", "Campo de texto editable."},
-    {16, "ViewportFrame", "Escena 3D dentro de la interfaz."},
-    {16, "VideoFrame", "Muestra video dentro de la interfaz."},
-    {16, "BillboardGui", "Interfaz 3D que mira hacia la camara."},
-    {16, "SurfaceGui", "Interfaz dibujada sobre una superficie."},
-    {16, "UIComponent", "Clase base abstracta de componentes de interfaz."},
-    {16, "UICorner", "Configura las esquinas redondeadas."},
-    {16, "UIStroke", "Configura el contorno de un elemento."},
-    {16, "UIGradient", "Aplica un degradado de color."},
-    {16, "UIShadow", "Anade una sombra visual."},
-    {16, "UIPadding", "Define el espacio interior."},
-    {16, "UIScale", "Ajusta la escala de un elemento."},
-    {16, "UIAspectRatioConstraint", "Mantiene una proporcion de aspecto."},
-    {16, "UISizeConstraint", "Limita el tamano minimo y maximo."},
-    {16, "UITextSizeConstraint", "Limita el tamano del texto."},
-    {16, "UIDragDetector", "Permite arrastrar elementos de interfaz."},
-    {16, "UIFlexItem", "Comportamiento flexible en un diseno."},
-    {16, "UILayout", "Clase base abstracta de distribucion automatica."},
-    {16, "UIListLayout", "Organiza elementos en lista."},
-    {16, "UIGridLayout", "Organiza elementos en cuadricula."},
-    {16, "UITableLayout", "Organiza elementos en filas y columnas."},
-    {16, "UIPageLayout", "Organiza elementos como paginas navegables."},
-    {16, "UIGridStyleLayout", "Clase base abstracta de rejilla o lista."},
-
-    // 17. Interpolacion.
-    {17, "Tween", "Interpolacion gradual de propiedades."},
-    {17, "TweenService", "Coordina la creacion y ejecucion de tweens."},
-
-    // 18. Objetos de valor.
-    {18, "StringValue", "Almacena un texto."},
-    {18, "IntValue", "Almacena un numero entero."},
-    {18, "NumberValue", "Almacena un numero decimal."},
-    {18, "BoolValue", "Almacena verdadero o falso."},
-    {18, "Vector3Value", "Almacena un vector tridimensional."},
-    {18, "Color3Value", "Almacena un color."},
-    {18, "ObjectValue", "Almacena una referencia a otro objeto."},
-};
-
-constexpr int kClassCount =
-    static_cast<int>(sizeof(kClasses) / sizeof(kClasses[0]));
+// Las categorias y clases viven en ClassRegistry (fuente unica de datos
+// del motor). La Referencia de clases consume ese registro directamente,
+// igual que el buscador "+" y el panel Properties.
+const ClassRegistry& reg() { return ClassRegistry::get(); }
 
 // Colores de la vista (grises acordes al tema oscuro; sin blanco puro).
 COLORREF nameColor() { return RGB(214, 214, 220); }
@@ -446,7 +222,8 @@ bool DocsView::create(void* parentHwnd) {
 
     buildClassList();
     layout(rc.right, rc.bottom);
-    SK_INFO("Vista de documentacion de clases lista (%d clases)", kClassCount);
+    SK_INFO("Vista de documentacion de clases lista (%d clases)",
+            ClassRegistry::get().classCount());
     return true;
 }
 
@@ -475,9 +252,10 @@ void DocsView::showClass(const std::string& className) {
     HWND list = static_cast<HWND>(list_);
     if (!list) return;
     const int count = ListView_GetItemCount(list);
+    const int n = reg().classCount();
     for (int i = 0; i < count; ++i) {
-        if (i < 0 || i >= kClassCount) break;
-        if (className == kClasses[i].name) {
+        if (i < 0 || i >= n) break;
+        if (className == reg().at(i).name) {
             sel_ = i;
             ListView_SetItemState(list, i, LVIS_SELECTED | LVIS_FOCUSED,
                                   LVIS_SELECTED | LVIS_FOCUSED);
@@ -493,8 +271,9 @@ void DocsView::buildClassList() {
     if (!list) return;
     ListView_DeleteAllItems(list);
 
-    for (int i = 0; i < kClassCount; ++i) {
-        const ClassDef& c = kClasses[i];
+    const ClassRegistry& r = reg();
+    for (int i = 0; i < r.classCount(); ++i) {
+        const ClassDef& c = r.at(i);
 
         // El texto del item es el nombre (columna "Clase"); el icono y el
         // resto se pintan en paintRow. La primera columna tambien lleva el
@@ -512,43 +291,44 @@ void DocsView::buildClassList() {
 }
 
 void DocsView::updateDetails() {
-    if (sel_ < 0 || sel_ >= kClassCount) return;
-    const ClassDef& c = kClasses[sel_];
+    const ClassRegistry& r = reg();
+    if (sel_ < 0 || sel_ >= r.classCount()) return;
+    const ClassDef& c = r.at(sel_);
     if (title_) {
         SetWindowTextA(static_cast<HWND>(title_), c.name);
     }
     if (category_) {
         SetWindowTextA(static_cast<HWND>(category_),
-                       kCategories[c.cat].name);
+                       r.categories()[c.category].name);
     }
     if (desc_) {
         SetWindowTextA(static_cast<HWND>(desc_), c.shortDesc);
     }
-    // Tabla "Propiedades": valores por defecto tomados del catalogo
-    // compartido (misma fuente que usa el boton "+" y las Properties).
+    // Tabla "Propiedades": propiedades efectivas del registro (misma fuente
+    // que usa el boton "+" y el panel Properties).
     if (props_) {
         HWND list = static_cast<HWND>(props_);
         ListView_DeleteAllItems(list);
-        if (const catalog::ClassDef* def = catalog::findClass(c.name)) {
-            for (int i = 0; i < def->propCount; ++i) {
-                const catalog::PropDef& p = def->props[i];
-                LVITEMA item{};
-                item.mask = LVIF_TEXT;
-                item.iItem = i;
-                item.pszText = const_cast<char*>(p.name);
-                ListView_InsertItem(list, &item);
-                char value[160]{};
-                lstrcpynA(value, p.def, 160);
-                ListView_SetItemText(list, i, 1, value);
-            }
+        int row = 0;
+        for (const PropertyDef& p : c.effective) {
+            LVITEMA item{};
+            item.mask = LVIF_TEXT;
+            item.iItem = row;
+            item.pszText = const_cast<char*>(p.name);
+            ListView_InsertItem(list, &item);
+            char value[160]{};
+            lstrcpynA(value, p.def ? p.def : "", 160);
+            ListView_SetItemText(list, row, 1, value);
+            ++row;
         }
     }
 }
 
 void DocsView::paintRow(const DRAWITEMSTRUCT& dis) const {
+    const ClassRegistry& r = reg();
     const int idx = static_cast<int>(dis.itemID);
-    if (idx < 0 || idx >= kClassCount) return;
-    const ClassDef& c = kClasses[idx];
+    if (idx < 0 || idx >= r.classCount()) return;
+    const ClassDef& c = r.at(idx);
 
     HDC hdc = dis.hDC;
     RECT rc = dis.rcItem;
@@ -586,7 +366,7 @@ void DocsView::paintRow(const DRAWITEMSTRUCT& dis) const {
     RECT iconRc = rc;
     iconRc.right = rc.left + w0;
     wchar_t icon[8]{};
-    copyW(icon, 8, kCategories[c.cat].icon);
+    copyW(icon, 8, c.icon);
     HFONT oldFont = static_cast<HFONT>(SelectObject(hdc, emojiFont()));
     SetTextColor(hdc, nameColor());
     DrawTextW(hdc, icon, -1, &iconRc,

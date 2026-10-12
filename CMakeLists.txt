@@ -53,7 +53,6 @@ add_executable(${PROJECT_NAME}
     src/platform/window.cpp
     src/project/project.cpp
     src/project/scripts.cpp
-    src/scene/class_catalog.cpp
     src/scene/picking.cpp
     src/scene/gizmo.cpp
     src/scene/snapping.cpp

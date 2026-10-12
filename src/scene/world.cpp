@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 
@@ -149,6 +150,8 @@ bool valueDiffersFromDefault(const PropertyValue& val, const PropertyDef& def) {
 void World::clear() {
     pool_.clear();
     roots_.clear();
+    childNames_.clear();
+    nameCounters_.clear();
     nextId_ = 1;
     globalScripts_ = kInvalidId;
     assetsRoot_ = kInvalidId;
@@ -218,11 +221,40 @@ InstanceId World::findChild(InstanceId parent,
                             const std::string& name) const {
     const Instance* p = find(parent);
     if (!p) return kInvalidId;
-    for (InstanceId cid : p->children()) {
-        const Instance* c = find(cid);
-        if (c && c->name() == name) return cid;
+    auto it = childNames_.find(parent);
+    if (it == childNames_.end()) return kInvalidId;
+    auto nit = it->second.find(name);
+    return nit == it->second.end() ? kInvalidId : nit->second;
+}
+
+void World::indexChild(InstanceId parent, const std::string& name,
+                       InstanceId id) {
+    childNames_[parent][name] = id;
+}
+
+void World::unindexChild(InstanceId parent, const std::string& name) {
+    auto it = childNames_.find(parent);
+    if (it == childNames_.end()) return;
+    it->second.erase(name);
+    if (it->second.empty()) childNames_.erase(it);
+}
+
+void World::rebuildNameIndex() {
+    childNames_.clear();
+    nameCounters_.clear();
+    for (const auto& entry : pool_) {
+        const Instance& inst = entry.second;
+        indexChild(inst.parentId(), inst.name(), entry.first);
     }
-    return kInvalidId;
+}
+
+void World::setNameIndexed(InstanceId id, const std::string& name) {
+    Instance* inst = find(id);
+    if (!inst) return;
+    const InstanceId parent = inst->parentId();
+    unindexChild(parent, inst->name());
+    inst->setName(name);
+    indexChild(parent, name, id);
 }
 
 std::vector<InstanceId> World::dimensions() const {
@@ -262,12 +294,22 @@ std::vector<InstanceId> World::subtree(InstanceId id) const {
 // =========================================================================
 std::string World::uniqueName(InstanceId parent, const std::string& base) const {
     std::string root = base.empty() ? "Object" : base;
-    if (findChild(parent, root) == kInvalidId) return root;
-    for (int i = 1; i < 100000; ++i) {
-        std::string cand = root + std::to_string(i);
-        if (findChild(parent, cand) == kInvalidId) return cand;
+    auto namesIt = childNames_.find(parent);
+    if (namesIt == childNames_.end() ||
+        namesIt->second.find(root) == namesIt->second.end()) {
+        return root;
     }
-    return root;
+    const auto& names = namesIt->second;
+    int& counter = nameCounters_[parent][root];
+    if (counter < 1) counter = 1;
+    for (;;) {
+        const std::string cand = root + std::to_string(counter);
+        if (names.find(cand) == names.end()) {
+            ++counter;
+            return cand;
+        }
+        ++counter;
+    }
 }
 
 // =========================================================================
@@ -312,6 +354,7 @@ InstanceId World::createNamed(const std::string& className,
 void World::adoptChild(InstanceId parent, InstanceId child, size_t index) {
     Instance* c = find(child);
     if (!c) return;
+    unindexChild(c->parentId(), c->name());
     c->setParentId(parent);
     if (parent == kInvalidId) {
         if (index > roots_.size()) index = roots_.size();
@@ -320,11 +363,15 @@ void World::adoptChild(InstanceId parent, InstanceId child, size_t index) {
         Instance* p = find(parent);
         if (p) p->insertChild(index, child);
     }
+    indexChild(parent, c->name(), child);
 }
 
 void World::detachChild(InstanceId parent, InstanceId child) {
     Instance* c = find(child);
-    if (c) c->setParentId(kInvalidId);
+    if (c) {
+        unindexChild(parent, c->name());
+        c->setParentId(kInvalidId);
+    }
     if (parent == kInvalidId) {
         roots_.erase(std::remove(roots_.begin(), roots_.end(), child),
                      roots_.end());
@@ -348,6 +395,8 @@ bool World::remove(InstanceId id) {
 
     detachChild(parent, id);
     for (InstanceId sub : all) {
+        const Instance* s = find(sub);
+        if (s) unindexChild(s->parentId(), s->name());
         collection_.clearTags(sub);
         pool_.erase(sub);
         emitRemoved(sub);
@@ -394,7 +443,7 @@ bool World::rename(InstanceId id, const std::string& name) {
     if (clean.empty()) return false;
     const std::string unique = uniqueName(inst->parentId(), clean);
     if (unique == inst->name()) return false;
-    inst->setName(unique);
+    setNameIndexed(id, unique);
     emitChanged(id);
     return true;
 }
@@ -592,6 +641,9 @@ Instance& World::insertInstance(Instance inst) {
     auto res = pool_.emplace(id, std::move(inst));
     if (id >= nextId_) nextId_ = id + 1;
     renderDirty_ = true;
+    // Indice provisional; adoptChild/rebuildNameIndex lo reasignan al padre
+    // definitivo cuando corresponda.
+    indexChild(res.first->second.parentId(), res.first->second.name(), id);
     return res.first->second;
 }
 
@@ -615,6 +667,12 @@ void World::restoreInstances(const std::vector<Instance>& nodes,
     for (const Instance& n : nodes) insertInstance(n);
     if (!nodes.empty()) {
         adoptChild(parent, nodes.front().id(), index);
+    }
+    // Los descendientes conservan su enlace interno; registra todos sus
+    // nombres en el indice.
+    for (const Instance& n : nodes) {
+        const Instance* inst = find(n.id());
+        if (inst) indexChild(inst->parentId(), inst->name(), inst->id());
     }
     invalidateRender();
 }
@@ -676,13 +734,26 @@ bool World::saveToFile(const std::string& path) const {
         f.write(text.data(), static_cast<std::streamsize>(text.size()));
         if (!f) return false;
     }
-    std::remove(path.c_str());
-    return std::rename(tmp.c_str(), path.c_str()) == 0;
+    // Reemplazo atomico: renombrar sobre el destino (en Windows y POSIX
+    // std::filesystem::rename sustituye el existente). Si falla, se
+    // conserva el .tmp para el siguiente intento.
+    std::error_code ec;
+    std::filesystem::rename(tmp, path, ec);
+    return !ec;
 }
 
 bool World::loadFromFile(const std::string& path) {
     std::ifstream f(path, std::ios::binary);
-    if (!f) return false;
+    if (!f) {
+        // Recuperacion: si el guardado anterior se interrumpio tras
+        // escribir el .tmp, se promociona a archivo definitivo y se carga.
+        const std::string tmp = path + ".tmp";
+        std::error_code ec;
+        std::filesystem::rename(tmp, path, ec);
+        if (ec) return false;
+        f.open(path, std::ios::binary);
+        if (!f) return false;
+    }
     std::vector<std::string> lines;
     std::string line;
     while (std::getline(f, line)) lines.push_back(line);
@@ -699,6 +770,7 @@ bool World::loadFromFile(const std::string& path) {
     suppressEvents_ = true;
     const bool ok = (version >= 2) ? loadV2(lines) : loadV1(lines);
     suppressEvents_ = false;
+    rebuildNameIndex();
     rebuildCollection();
     invalidateRender();
     return ok;

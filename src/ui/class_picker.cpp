@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-#include "../scene/class_catalog.h"
+#include "../scene/class_registry.h"
 #include "theme.h"
 
 namespace sk {
@@ -33,19 +33,20 @@ struct State {
 const std::vector<std::string>& insertableClasses() {
     static std::vector<std::string> names;
     if (names.empty()) {
-        const catalog::ClassDef* cls = catalog::classes();
-        const int n = catalog::classCount();
-        for (int i = 0; i < n; ++i) {
-            if (catalog::insertable(cls[i])) names.push_back(cls[i].name);
+        const ClassRegistry& r = ClassRegistry::get();
+        for (int i = 0; i < r.classCount(); ++i) {
+            const ClassDef& c = r.at(i);
+            if (c.insertable) names.push_back(c.name);
         }
     }
     return names;
 }
 
 const wchar_t* iconFor(const std::string& className) {
-    const catalog::ClassDef* c = catalog::findClass(className);
+    const ClassRegistry& r = ClassRegistry::get();
+    const ClassDef* c = r.find(className);
     if (!c) return L"\u25A0";
-    return catalog::categories()[c->cat].icon;
+    return r.categories()[c->category].icon;
 }
 
 std::string toLower(const std::string& s) {

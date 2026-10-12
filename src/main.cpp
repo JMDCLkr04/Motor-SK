@@ -309,7 +309,7 @@ int main(int argc, char** argv) {
         }
     };
 
-    // Renombrar una Part (campo Nombre de Properties o tecla F12): lo
+    // Renombrar una Part (campo Nombre de Properties o tecla F2): lo
     // aplica al World, al Explorer y al resto de paneles. Devuelve false
     // y no toca nada si el cambio no es valido (vacio, igual, duplicado,
     // protegido o inexistente).
@@ -964,7 +964,7 @@ int main(int argc, char** argv) {
     bool rotXKeyWasDown = false;
     bool undoKeyWasDown = false;
     bool redoKeyWasDown = false;
-    bool f12KeyWasDown = false;
+    bool f2KeyWasDown = false;
     bool fKeyWasDown = false;
     bool f1KeyWasDown = false;
     bool groupKeyWasDown = false;
@@ -1427,7 +1427,7 @@ int main(int argc, char** argv) {
         }
 
         // --- Deshacer/rehacer (Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z),
-        // renombrar con F12 y foco de camara en la seleccion (F) ---
+        // renombrar con F2 y foco de camara en la seleccion (F) ---
         {
             const bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
             const bool shiftDown = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
@@ -1444,8 +1444,8 @@ int main(int argc, char** argv) {
                                        (shiftDown && window.keyDown('Z')));
                 if (edge(redoDown, redoKeyWasDown)) doRedo();
 
-                // F12: renombrar la parte activa con un dialogo de texto.
-                if (edge(window.keyDown(VK_F12), f12KeyWasDown) &&
+                // F2: renombrar la parte activa con un dialogo de texto.
+                if (edge(window.keyDown(VK_F2), f2KeyWasDown) &&
                     primary != sk::kInvalidId) {
                     const sk::Instance* object = world.find(primary);
                     if (object) {

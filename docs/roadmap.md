@@ -1,25 +1,25 @@
-# Roadmap
+﻿# Roadmap
 
-## Fase 0 — Setup ✅
+## Fase 0 â€” Setup âœ…
 
 - [x] Compilador MSVC 19.44 + CMake 4.4.4
 - [x] Vulkan SDK 1.4.363.0
 - [x] ICD de software (lavapipe) para poder ejecutar sin GPU Vulkan
 - [x] Repositorio con build base
 
-## Fase 1 — Ventana y cámara (en curso)
+## Fase 1 â€” Ventana y cÃ¡mara (en curso)
 
 Ejecutable `.exe` con:
 
 - [x] Ventana Win32 con swapchain de Vulkan (resize incluido)
 - [x] Panel de proyectos (Win32 ListView): listar, crear, abrir, renombrar,
-      borrar y lista de recientes. Raíz fija: `Documentos\Motor SK\Proyectos`
+      borrar y lista de recientes. RaÃ­z fija: `Documentos\Motor SK\Proyectos`
 - [x] Interfaz modo oscuro: fondo negro, texto blanco, botones redondeados
-      (owner-draw), lista y cabeceras oscuras, barra de título oscura
-- [x] Aplicación de ventana sin consola (errores fatales en MessageBox)
-- [x] Tabla con márgenes, esquinas redondeadas y marco; tipografía Segoe UI
+      (owner-draw), lista y cabeceras oscuras, barra de tÃ­tulo oscura
+- [x] AplicaciÃ³n de ventana sin consola (errores fatales en MessageBox)
+- [x] Tabla con mÃ¡rgenes, esquinas redondeadas y marco; tipografÃ­a Segoe UI
       (12px, cabeceras semibold)
-- [x] Abrir un proyecto → vista 3D (Esc vuelve al panel)
+- [x] Abrir un proyecto â†’ vista 3D (Esc vuelve al panel)
 - [x] Icono del programa (logo.ico embebido via app.rc): ventana, barra de
        tareas y Alt+Tab
 - [x] Banda superior: fila de atajos estilo Roblox con el boton "Part" (anade
@@ -85,10 +85,10 @@ Ejecutable `.exe` con:
 - [x] Rectangulo de arrastre del marquee alineado con el puntero (origen y
         tamano corregidos en el render, clamado al viewport)
 - [x] Botones de herramientas con el texto pintado una sola vez
-- [x] Abrir/importar un archivo de escena `.scene`: menú Archivo > Importar /
+- [x] Abrir/importar un archivo de escena `.scene`: menÃº Archivo > Importar /
         Importar como (con prefijo de nombre), incorpora los objetos a la
         escena actual
-- [x] Cámara libre: WASD para moverse, click derecho para mirar, scroll para
+- [x] CÃ¡mara libre: WASD para moverse, click derecho para mirar, scroll para
        acercar/alejar
 - [x] Rejilla de referencia en el suelo (para percibir el movimiento)
 - [x] Arrastre del cuerpo de un objeto: pulsar sobre un Part y arrastrarlo
@@ -112,7 +112,7 @@ Ejecutable `.exe` con:
         renombrar, borrar, cortar/pegar, clonar, rotar y los arrastres de
         objeto y de gizmo), pila limitada a 50 pasos y historia nueva por
         proyecto; deshacer/rehacer reconstruye el Explorer y guarda
-- [x] Renombrar con F12: dialogo de texto sobre la parte activa, con la
+- [x] Renombrar con F2: dialogo de texto sobre la parte activa, con la
         misma validacion que el campo Nombre de Properties (no vacio, no
         duplicado)
 - [x] Foco de camara (F): enfoca la seleccion (centro y tamano de todo el
@@ -128,7 +128,7 @@ Ejecutable `.exe` con:
         lo devuelve a la raiz); la escena persiste `parent:` de cada objeto y
         borrar/cortar/renombrar/pegar/clonar/importar/deshacer respetan la
         jerarquia (sin ciclos; el render todavia usa posiciones absolutas)
-- [x] Catalogo unico de clases (`scene/class_catalog`): 19 categorias y ~145
+- [x] Catalogo unico de clases (`scene/class_registry`): 19 categorias y ~145
         clases con descripcion, propiedades y valores por defecto; fuente
         unica de la Referencia de clases, las Properties, el buscador del `+`
         y los iconos
@@ -136,7 +136,7 @@ Ejecutable `.exe` con:
         descripcion y tabla de propiedades por defecto tomada del catalogo
 - [x] Boton `+` del Explorer: selector emergente con buscador que inserta
         cualquier clase insertable del catalogo bajo el nodo elegido
-- [x] Pestañas de panel: Properties | Output (log del motor) a la izquierda
+- [x] PestaÃ±as de panel: Properties | Output (log del motor) a la izquierda
         y Explorer | Assets (biblioteca del proyecto) a la derecha
 - [x] Attributes y Tags en Properties (multilinea `nombre|tipo|valor` y una
         etiqueta por linea), persistidos en la escena
@@ -154,7 +154,7 @@ Ejecutable `.exe` con:
         atomico** (temporal + rename), build Release `/O2 /GL` con LTCG y
         runtime estatico `/MT` (sin redistributable), y flag `--stats`
 
-## Fase 1.5 — Modelo de datos Instance/World ✅
+## Fase 1.5 â€” Modelo de datos Instance/World âœ…
 
 - [x] `Instance` con id estable (`InstanceId`, nunca se reutilizan), pool en
       `World` (sustituye `Scene`/`SceneObject`, que se eliminaron), nombres
@@ -165,7 +165,8 @@ Ejecutable `.exe` con:
       ModuleScripts); protegidos Workspace/Camera/Lighting/Scripts y las raices
       de Scripts/Assets
 - [x] `ClassRegistry` unico (categorias, clases, propiedades efectivas, valores
-      por defecto, insertables); `class_catalog` pasa a ser su adaptador
+      por defecto, insertables); la Referencia de clases y el `+` lo consumen
+      directamente
 - [x] `CollectionService`: indice tag -> instancias con eventos
 - [x] Comandos con deltas y `UndoStack` (pila de 100, compuestos): crear,
       renombrar, mover, borrar/restaurar subarbol, clonar, agrupar/desagrupar,
@@ -178,14 +179,14 @@ Ejecutable `.exe` con:
 - [x] Tests del modelo (`tests/test_model.cpp`, `motorsk_tests` + CTest): 9
       pruebas, 76 comprobaciones, 0 fallos
 
-## Fase 2 — Render básico
+## Fase 2 â€” Render bÃ¡sico
 
 - [ ] Pipelines: shader vert/frag con `glslc` en build time
 - [x] Mallas: cubo de 36 vertices con color por cara (pipeline de
        triangulos propio, mismos shaders y push constant que la rejilla)
 - [x] Depth buffer
 
-## Fase 3 — Escenas y recursos
+## Fase 3 â€” Escenas y recursos
 
 - [x] Formato de escena propio (texto, versionado): `escenas/inicio.scene`
        con `instancia/parent/clase/nombre/prop/atributo/tag` por id,
@@ -200,3 +201,4 @@ Ejecutable `.exe` con:
 
 - [ ] Backend Linux (X11/Wayland) trasladando la capa `platform/`
 - [ ] Android via NDK (clang) reutilizando la capa `platform/` y el renderer
+

@@ -127,3 +127,4 @@ Motor-SK/
 
 - [docs/entorno.md](docs/entorno.md): instalación exacta del entorno (replicable en otra máquina)
 - [docs/roadmap.md](docs/roadmap.md): fases del motor
+- [docs/arquitectura.md](docs/arquitectura.md): módulos, flujos escena → UI/render y cómo probar

@@ -60,6 +60,9 @@ public:
     const Instance* find(InstanceId id) const;
     bool exists(InstanceId id) const { return pool_.count(id) != 0; }
     InstanceId findChild(InstanceId parent, const std::string& name) const;
+    // Cambia el nombre manteniendo el indice (parent, nombre) -> id sin
+    // validar ni emitir eventos. Para undo/redo de renombrados.
+    void setNameIndexed(InstanceId id, const std::string& name);
 
     const std::vector<InstanceId>& roots() const { return roots_; }
     std::vector<InstanceId> dimensions() const;
@@ -157,12 +160,24 @@ private:
     void emitRemoved(InstanceId id);
     void emitChanged(InstanceId id);
     void emitReparented(InstanceId id, InstanceId oldP, InstanceId newP);
+    void indexChild(InstanceId parent, const std::string& name, InstanceId id);
+    void unindexChild(InstanceId parent, const std::string& name);
+    void rebuildNameIndex();
     void refreshRenderCache() const;
     bool loadV2(const std::vector<std::string>& lines);
     bool loadV1(const std::vector<std::string>& lines);
 
     std::unordered_map<InstanceId, Instance> pool_;
     std::vector<InstanceId> roots_;
+    // Indice (padre, nombre) -> id para findChild/uniqueName en tiempo
+    // constante amortizado. Se mantiene en todas las mutaciones.
+    std::unordered_map<InstanceId,
+                       std::unordered_map<std::string, InstanceId>>
+        childNames_;
+    // Siguiente sufijo a probar por (padre, nombre base); evita recontar
+    // desde 1 en cada alta (mutable: uniqueName es const).
+    mutable std::unordered_map<InstanceId, std::unordered_map<std::string, int>>
+        nameCounters_;
     mutable InstanceId nextId_ = 1;
     InstanceId globalScripts_ = kInvalidId;
     InstanceId assetsRoot_ = kInvalidId;

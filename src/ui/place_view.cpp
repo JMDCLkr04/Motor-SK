@@ -899,16 +899,16 @@ long long __stdcall PlaceView::treeSubclassProc(void* hwndPtr,
                 InstanceId parentId = kInvalidId;
                 if (dragged && target && dragged != target &&
                     dragged != static_cast<HTREEITEM>(self->root_)) {
+                    // El nodo arrastrado pasa a ser hijo del nodo bajo el
+                    // cursor. Soltar X sobre Y deja a X dentro de Y.
                     childId = readNodeId(hwnd, dragged);
                     if (target == static_cast<HTREEITEM>(self->root_)) {
                         // Suelta sobre el grupo Dimensions: el arrastrado
                         // vuelve a la dimension raiz (parent = ninguno).
                         parentId = kInvalidId;
                     } else {
-                        // Soltar X sobre Y: Y queda dentro de X (el
-                        // arrastrado absorbe al del cursor).
-                        childId = readNodeId(hwnd, target);
-                        parentId = readNodeId(hwnd, dragged);
+                        // Soltar X sobre Y: X queda dentro de Y.
+                        parentId = readNodeId(hwnd, target);
                     }
                 }
                 if (childId != kInvalidId && self->onReparent_) {

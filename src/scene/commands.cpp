@@ -131,15 +131,15 @@ public:
     void apply(World& world) override {
         if (!valid_) return;
         world.detachChild(oldParent_, id_);
-        world.adoptChild(newParent_, id_, newIndex_);
         if (Instance* i = world.find(id_)) i->setName(newName_);
+        world.adoptChild(newParent_, id_, newIndex_);
         world.markChanged(id_);
     }
     void undo(World& world) override {
         if (!valid_) return;
         world.detachChild(newParent_, id_);
-        world.adoptChild(oldParent_, id_, oldIndex_);
         if (Instance* i = world.find(id_)) i->setName(oldName_);
+        world.adoptChild(oldParent_, id_, oldIndex_);
         world.markChanged(id_);
     }
     const char* label() const override { return "Mover"; }
@@ -169,12 +169,12 @@ public:
 
     void apply(World& world) override {
         if (!valid_) return;
-        if (Instance* i = world.find(id_)) i->setName(newName_);
+        world.setNameIndexed(id_, newName_);
         world.markChanged(id_);
     }
     void undo(World& world) override {
         if (!valid_) return;
-        if (Instance* i = world.find(id_)) i->setName(oldName_);
+        world.setNameIndexed(id_, oldName_);
         world.markChanged(id_);
     }
     const char* label() const override { return "Renombrar"; }
