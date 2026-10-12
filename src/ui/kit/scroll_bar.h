@@ -31,12 +31,17 @@ public:
     void onMouseMove(int x, int y);
     void onMouseWheel(int delta, WPARAM flags = 0);
     void onKey(int key);
+    // El capture se perdio (WM_CAPTURECHANGED): abandonar el arrastre.
+    void onCaptureChanged();
     void update();
 
 private:
     void recalc();
     void clampPos();
     float thumbRatio() const;
+    // Hay desbordamiento (rango mayor que la pagina): solo entonces se
+    // dibuja y se permite arrastrar el pulgar.
+    bool overflowing() const;
 
     HWND parent_ = nullptr;
     int id_ = 0;

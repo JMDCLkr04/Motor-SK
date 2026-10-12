@@ -43,7 +43,7 @@ target_include_directories(motorsk_model PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 set_target_properties(motorsk_model PROPERTIES
     CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
 if(MSVC)
-    target_compile_options(motorsk_model PRIVATE /W4)
+    target_compile_options(motorsk_model PRIVATE /W4 /utf-8)
 endif()
 
 add_executable(${PROJECT_NAME}
@@ -77,6 +77,7 @@ add_executable(${PROJECT_NAME}
     src/ui/kit/tree_widget.cpp
     src/ui/kit/list_widget.cpp
     src/ui/kit/demo_window.cpp
+    src/ui/kit/kit.cpp
 )
 
 target_link_libraries(${PROJECT_NAME} PRIVATE motorsk_model)
@@ -91,7 +92,7 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE VK_USE_PLATFORM_WIN32_KHR)
 target_link_libraries(${PROJECT_NAME} PRIVATE Vulkan::Vulkan comctl32 shell32 gdi32 dwmapi shlwapi windowscodecs msimg32)
 
 if(MSVC)
-    target_compile_options(${PROJECT_NAME} PRIVATE /W4)
+    target_compile_options(${PROJECT_NAME} PRIVATE /W4 /utf-8)
     # Release: optimizacion plena (/O2) + optimizacion global (/GL) con
     # LTCG en el enlace. Sin /arch:AVX (los equipos de 2011 no lo tienen;
     # el default SSE2 funciona en todas las CPUs x64).
@@ -112,7 +113,7 @@ if(MOTORSK_BUILD_TESTS)
     set_target_properties(motorsk_tests PROPERTIES
         CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
     if(MSVC)
-        target_compile_options(motorsk_tests PRIVATE /W4)
+        target_compile_options(motorsk_tests PRIVATE /W4 /utf-8)
     endif()
     add_test(NAME modelo COMMAND motorsk_tests)
 endif()

@@ -49,6 +49,8 @@ void ScrollBar::setRect(const RECT& r) {
     update();
 }
 
+bool ScrollBar::overflowing() const { return max_ > min_ && (max_ - min_) > page_; }
+
 void ScrollBar::paint(HDC hdc) {
     if (!visible_) return;
     HBRUSH rail = CreateSolidBrush(theme::scrollRail());
@@ -61,7 +63,8 @@ void ScrollBar::paint(HDC hdc) {
     DeleteObject(pen);
     DeleteObject(rail);
 
-    if (max_ <= min_) return;
+    // Sin desbordamiento no hay pulgar.
+    if (!overflowing()) return;
     float ratio = thumbRatio();
     int len = vertical_ ? (rc_.bottom - rc_.top) : (rc_.right - rc_.left);
     int thumbLen = std::max<int>(10,(int)(len * ratio));
@@ -100,15 +103,23 @@ bool ScrollBar::hitTest(int x, int y) const {
 }
 
 void ScrollBar::onMouseDown(int x, int y) {
-    if (max_ <= min_ || !visible_) return;
+    if (!overflowing() || !visible_) return;
     dragging_ = true;
     dragStart_ = vertical_ ? y : x;
+    dragOffset_ = 0;
     SetCapture(parent_);
 }
 
 void ScrollBar::onMouseUp() {
     if (dragging_) {
         ReleaseCapture();
+        dragging_ = false;
+        if (parent_) InvalidateRect(parent_, &rc_, FALSE);
+    }
+}
+
+void ScrollBar::onCaptureChanged() {
+    if (dragging_) {
         dragging_ = false;
         if (parent_) InvalidateRect(parent_, &rc_, FALSE);
     }
@@ -141,7 +152,7 @@ void ScrollBar::onMouseWheel(int delta, WPARAM) {
 }
 
 void ScrollBar::onKey(int key) {
-    if (max_ <= min_) return;
+    if (!overflowing()) return;
     int step = std::max<int>(1,page_ / 10);
     if (key == VK_DOWN || key == VK_RIGHT) pos_ += step;
     if (key == VK_UP || key == VK_LEFT) pos_ -= step;
@@ -153,7 +164,7 @@ void ScrollBar::onKey(int key) {
 }
 
 void ScrollBar::update() {
-    bool v = (max_ > min_ && (max_ - min_) > page_);
+    bool v = overflowing();
     if (v != visible_) {
         visible_ = v;
         if (parent_) InvalidateRect(parent_, &rc_, FALSE);

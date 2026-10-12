@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <string>
 #include <vector>
 #include <windows.h>
 
@@ -10,8 +11,16 @@ namespace sk {
 namespace ui {
 
 struct TabStripItem {
-    const char* text;
+    std::string text; // UTF-8 interno
     bool closeable = false;
+};
+
+enum class TabHit { None, Tab, Close, Plus };
+
+struct TabHitResult {
+    TabHit kind = TabHit::None;
+    int index = -1;
+    RECT close{}; // rect del boton de cierre (hover)
 };
 
 class TabStrip {
@@ -31,15 +40,29 @@ public:
     void setOnPlus(std::function<void()> cb) { onPlus_ = std::move(cb); }
 
     void paint(HDC hdc);
-    int hitTest(int x, int y);
+    TabHitResult hitTest(int x, int y);
+    // La ventana anfitriona reenvia el raton.
+    void onMouseMove(int x, int y);
+    void onMouseLeave();
+    bool onMouseDown(int x, int y);
+    void onMouseWheel(int delta);
 
 private:
+    void recomputeLayout();
+
     HWND parent_ = nullptr;
     int id_ = 0;
     bool showPlus_ = false;
     std::vector<TabStripItem> items_;
     int selected_ = -1;
     RECT rc_ = {};
+    int offset_ = 0; // scroll horizontal (rueda) con muchas pestanas
+    int hover_ = -1; // pestana bajo el raton
+    bool hoverClose_ = false;
+    bool hoverPlus_ = false;
+    std::vector<int> xs_; // x inicial de cada pestana (offset aplicado)
+    std::vector<int> ws_; // ancho de cada pestana
+    int plusX_ = 0;
     std::function<void(int)> onSelected_;
     std::function<void(int)> onClose_;
     std::function<void()> onPlus_;

@@ -3,6 +3,8 @@
 #include <windows.h>
 #include <dwmapi.h>
 
+#include "kit/kit.h"
+
 namespace sk {
 
 // Tema oscuro de la interfaz Win32: colores y pintado de botones
@@ -141,13 +143,13 @@ inline void paintDarkButton(const DRAWITEMSTRUCT& dis, bool hover,
 
     if (!drawText) return;
 
-    char label[128]{};
-    GetWindowTextA(dis.hwndItem, label, static_cast<int>(sizeof(label)));
+    WCHAR label[128]{};
+    GetWindowTextW(dis.hwndItem, label, static_cast<int>(sizeof(label) / sizeof(label[0])));
 
     HFONT oldFont = static_cast<HFONT>(SelectObject(hdc, uiFont()));
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, (dis.itemState & ODS_DISABLED) ? textDisabled() : text());
-    DrawTextA(hdc, label, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    DrawTextW(hdc, label, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     SelectObject(hdc, oldFont);
 }
 

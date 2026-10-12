@@ -109,6 +109,9 @@ int main(int argc, char** argv) {
             sk::ui::runUIDemo();
             return 0;
         }
+        if (std::strcmp(argv[i], "--gdi-check") == 0) {
+            return sk::ui::runGdiCheck() ? 0 : 3;
+        }
     }
 
     // Medal y OBS registran capas implicitas de Vulkan cuyos hooks
