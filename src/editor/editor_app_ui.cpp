@@ -68,10 +68,12 @@ void EditorApp::wireUi() {
     workspace_.setOnPlay([this]() {
         if (active_.folder.empty()) return;
         play_.open(world_, camera_, false);
+        place_.activateOutput(); // los mensajes del test se ven de inmediato
     });
     workspace_.setOnRun([this]() {
         if (active_.folder.empty()) return;
         play_.open(world_, camera_, true);
+        place_.activateOutput();
     });
     workspace_.setOnStop([this]() { play_.close(); });
 

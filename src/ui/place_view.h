@@ -45,6 +45,11 @@ public:
     // el sink de SK_INFO/WARN/ERROR.
     void appendOutput(int level, const std::string& message);
 
+    // Activa la pestana izquierda indicada (p. ej. Output al ejecutar un
+    // test, o Properties al seleccionar un objeto).
+    void activateProperties() { switchLeftTab(0); }
+    void activateOutput() { switchLeftTab(1); }
+
     void setVisible(bool visible);
     bool visible() const { return visible_; }
 

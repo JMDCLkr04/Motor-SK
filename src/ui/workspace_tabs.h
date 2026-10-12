@@ -51,6 +51,11 @@ public:
     // 0 = PLACE, 1 = CODE, 2 = GUI.
     int active() const { return active_; }
 
+    // Estado de ejecucion: mientras hay un test en marcha (ventana Play/Run
+    // abierta) el boton Stop se habilita; sin test queda deshabilitado.
+    void setRunning(bool running);
+    bool running() const { return running_; }
+
     // Se llama cada vez que cambia la division activa.
     void setOnTabChanged(std::function<void(int)> cb) { onTabChanged_ = std::move(cb); }
 
@@ -184,6 +189,7 @@ private:
     bool fileMenuOpen_ = false;
     bool visible_ = false;
     bool docsActive_ = false;
+    bool running_ = false;
     std::function<void(int)> onTabChanged_;
     std::function<void(int)> onAddPart_;
     std::function<void(int)> onToolChanged_;

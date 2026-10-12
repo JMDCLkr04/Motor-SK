@@ -615,6 +615,8 @@ bool WorkspaceTabs::create(void* parentHwnd) {
                      reinterpret_cast<WPARAM>(theme::uiFont()), TRUE);
         ui::makeDarkButton(button);
     }
+    // Sin test en marcha, Stop arranca deshabilitado.
+    if (stopButton_) EnableWindow(static_cast<HWND>(stopButton_), FALSE);
 
     // Fila de atajos (arriba): herramientas del viewport + "Part".
     for (int i = 0; i < kToolCount; ++i) {
@@ -863,6 +865,15 @@ void WorkspaceTabs::setTool(int tool) {
         }
     }
     if (onToolChanged_) onToolChanged_(tool);
+}
+
+void WorkspaceTabs::setRunning(bool running) {
+    if (running_ == running) return;
+    running_ = running;
+    if (stopButton_) {
+        EnableWindow(static_cast<HWND>(stopButton_), running ? TRUE : FALSE);
+        InvalidateRect(static_cast<HWND>(stopButton_), nullptr, TRUE);
+    }
 }
 
 void WorkspaceTabs::resize(int width, int height) {
