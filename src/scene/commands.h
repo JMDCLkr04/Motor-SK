@@ -103,4 +103,11 @@ CommandPtr makeGroupCommand(const World& world, InstanceId parent,
 // Desagrupa: sube los hijos de `group` a su padre y borra el grupo.
 CommandPtr makeUngroupCommand(const World& world, InstanceId group);
 
+// Crea una Dimension completa (Workspace, Camera, Lighting con sus efectos
+// y Scripts) como raiz nueva, en una sola entrada de deshacer. outRoot
+// recibe el id creado (kInvalidId si falla).
+CommandPtr makeCreateDimensionCommand(const World& world,
+                                      const std::string& name,
+                                      InstanceId* outRoot = nullptr);
+
 } // namespace sk

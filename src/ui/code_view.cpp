@@ -300,7 +300,7 @@ void CodeView::resize(int width, int height) {
 
 void CodeView::layoutPanels(int width, int height) {
     if (!scriptsPanel_ || !propsPanel_) return;
-    const int y = editor::Layout::topBandHeight();
+    const int y = editor::Layout::contentTopStatic();
     int panelH = height - y;
     if (panelH < 0) panelH = 0;
 

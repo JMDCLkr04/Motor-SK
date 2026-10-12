@@ -139,6 +139,16 @@ void EditorApp::wireUi() {
         onDeleteRequested(ids);
     });
 
+    // Tira de dimensiones: seleccionar la activa, crear, cerrar (con
+    // confirmacion) y renombrar. Todo pasa por comandos con undo+guardado.
+    dimsBar_.setOnSelected([this](InstanceId id) { setActiveDimension(id); });
+    dimsBar_.setOnPlus([this]() { onCreateDimension(); });
+    dimsBar_.setOnCloseRequested(
+        [this](InstanceId id) { onCloseDimension(id); });
+    dimsBar_.setOnRenamed([this](InstanceId id, const std::string& n) {
+        onRenameDimension(id, n);
+    });
+
     // CODE: el panel Properties consulta el objeto asociado a un script.
     code_.setOnQueryAssoc([this](const std::string& rel) -> std::string {
         for (InstanceId id : allInstances()) {

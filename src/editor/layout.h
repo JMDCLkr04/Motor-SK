@@ -21,12 +21,14 @@ struct Rect {
 // repetir anchos/altos: un cambio de interfaz se hace en un solo lugar.
 //
 //  - topBar:         barra superior completa (menus + atajos + pestañas).
-//  - dimensionStrip: fila de atajos/herramientas dentro de la barra.
-//  - tabRow:         fila de pestañas (navbar PLACE/CODE/GUI), bajo la
-//                    tira de dimensiones.
+//  - shortcutStrip:  fila de atajos/herramientas dentro de la barra.
+//  - tabRow:         fila de pestañas (navbar PLACE/CODE/GUI), dentro de la
+//                    barra.
+//  - dimensionBar:   tira de dimensiones a ancho completo, bajo la barra y
+//                    sobre los paneles/viewport.
 //  - leftPanel:      panel izquierdo (Properties).
 //  - rightPanel:     panel derecho (Explorer).
-//  - viewport:       zona 3D, entre ambos paneles y bajo la barra.
+//  - viewport:       zona 3D, entre ambos paneles y bajo la tira.
 //
 // Logica pura (sin Win32): se prueba en motorsk_model.
 struct Layout {
@@ -37,12 +39,15 @@ struct Layout {
     static constexpr int kTopBandHeight = WorkspaceTabs::kMenuBarHeight +
                                           WorkspaceTabs::kShortcutHeight +
                                           WorkspaceTabs::kNavbarHeight;
+    // Alto de la tira de dimensiones (fila de pestanas de dimension).
+    static constexpr int kDimensionBarHeight = 32;
 
     int width = 0;
     int height = 0;
     Rect topBar;
-    Rect dimensionStrip;
+    Rect shortcutStrip;
     Rect tabRow;
+    Rect dimensionBar;
     Rect leftPanel;
     Rect rightPanel;
     Rect viewport;
@@ -58,6 +63,16 @@ struct Layout {
     static int propertiesWidth() { return kPropertiesWidth; }
     static int explorerWidth() { return kExplorerWidth; }
     static int topBandHeight() { return kTopBandHeight; }
+    static int dimensionBarHeight() { return kDimensionBarHeight; }
+    // Y del contenido cuando la ventana tiene altura suficiente (caso normal
+    // y constante): banda superior + tira de dimensiones.
+    static int contentTopStatic() {
+        return kTopBandHeight + kDimensionBarHeight;
+    }
+
+    // Y donde empieza el contenido (paneles + viewport): justo bajo la tira
+    // de dimensiones. Con ventanas bajas la tira se recorta y baja tambien.
+    int contentTop() const { return dimensionBar.y + dimensionBar.h; }
 
     // true si (px, py) cae dentro de la zona 3D. Usa los mismos limites
     // inclusivos que el picking historico para no cambiar el comportamiento.

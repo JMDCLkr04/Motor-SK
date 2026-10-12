@@ -61,7 +61,7 @@ bool SelectionController::marqueeRect(const Vec2& a, const Vec2& b, int vpW,
     x0 = std::fmax(std::fmin(a.x, b.x),
                    static_cast<float>(vpLayout.viewport.x));
     y0 = std::fmax(std::fmin(a.y, b.y),
-                   static_cast<float>(vpLayout.topBar.bottom()));
+                   static_cast<float>(vpLayout.viewport.y));
     x1 = std::fmin(std::fmax(a.x, b.x),
                    static_cast<float>(vpLayout.rightPanel.x));
     y1 = std::fmin(std::fmax(a.y, b.y), static_cast<float>(vpH));

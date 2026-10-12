@@ -679,4 +679,30 @@ CommandPtr makeUngroupCommand(const World& world, InstanceId group) {
     return std::make_unique<UngroupCommand>(world, group);
 }
 
+CommandPtr makeCreateDimensionCommand(const World& world,
+                                      const std::string& name,
+                                      InstanceId* outRoot) {
+    // La estructura de una dimension (Workspace/Camera/Lighting/Scripts) se
+    // construye en un World temporal y se captura como subarbol; insertarlo
+    // como raiz con InsertSubtreeCommand da undo/redo gratis y con ids
+    // estables (el mismo id al rehacer).
+    World tmp;
+    const std::string dimName = name.empty() ? std::string("Dimension") : name;
+    const InstanceId root = tmp.createDimension(dimName);
+    std::vector<Instance> nodes;
+    std::vector<InstanceId> newIds;
+    for (InstanceId sid : tmp.subtree(root)) {
+        const Instance* inst = tmp.find(sid);
+        if (!inst) continue;
+        nodes.push_back(*inst);
+        newIds.push_back(world.allocateId());
+    }
+    std::vector<InstanceId> roots;
+    auto cmd = std::make_unique<InsertSubtreeCommand>(
+        world, std::move(nodes), std::move(newIds), kInvalidId, Vec3{}, "",
+        outRoot ? &roots : nullptr);
+    if (outRoot && !roots.empty()) *outRoot = roots.front();
+    return cmd;
+}
+
 } // namespace sk

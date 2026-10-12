@@ -37,6 +37,7 @@ bool EditorApp::frame(const InputState& in) {
         place_.resize(window_.framebufferWidth(), window_.framebufferHeight());
         code_.resize(window_.framebufferWidth(), window_.framebufferHeight());
         docs_.resize(window_.framebufferWidth(), window_.framebufferHeight());
+        layoutDimensionsBar();
         needsRedraw_ = true;
     }
     // Restaurado/descubierto (WM_PAINT): repinta el viewport.

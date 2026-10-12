@@ -20,6 +20,7 @@
 #include "../scene/instance.h"
 #include "../scene/world.h"
 #include "../ui/code_view.h"
+#include "../ui/dimensions_bar.h"
 #include "../ui/docs_view.h"
 #include "../ui/place_view.h"
 #include "../ui/play_window.h"
@@ -113,6 +114,24 @@ private:
     void onTagAdded(InstanceId id, const std::string& tag);
     void onTagRemoved(InstanceId id, const std::string& tag);
 
+    // --- Dimensiones (tira de dimensiones) ---
+    // Cambia la dimension activa: solo ella se dibuja y se puede elegir.
+    void setActiveDimension(InstanceId id);
+    InstanceId activeDimension() const { return activeDimension_; }
+    // true si `id` cuelga (o es) de la dimension activa; true si no hay
+    // dimension activa (sin filtro).
+    bool inActiveDimension(InstanceId id) const;
+    // Ids que quedan fuera de la dimension activa (para pickObjectExcept).
+    std::vector<InstanceId> hiddenFromActive() const;
+    // La tira se reconstruye y se coloca en su fila; tambien la visibilidad.
+    void refreshDimensionsBar();
+    void layoutDimensionsBar();
+
+    // Botones de la tira de dimensiones (con undo + guardado).
+    void onCreateDimension();
+    void onCloseDimension(InstanceId id);
+    void onRenameDimension(InstanceId id, const std::string& name);
+
     // --- Estado ---
     Window window_;
     Renderer renderer_;
@@ -129,10 +148,12 @@ private:
     CodeView code_;
     DocsView docs_;
     ui::PlayWindow play_;
+    ui::DimensionsBar dimsBar_;
     Camera camera_;
 
     std::vector<InstanceId> selection_;
     InstanceId primary_ = kInvalidId;
+    InstanceId activeDimension_ = kInvalidId;
 
     ClipboardController clipboard_;
     SelectionController selectionCtrl_;

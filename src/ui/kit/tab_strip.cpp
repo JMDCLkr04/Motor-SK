@@ -39,12 +39,23 @@ void TabStrip::setSelected(int index) {
 
 int TabStrip::selected() const { return selected_; }
 
+RECT TabStrip::tabRect(int index) const {
+    recomputeLayout();
+    RECT r{};
+    if (index < 0 || index >= static_cast<int>(items_.size())) return r;
+    r.left = xs_[index];
+    r.right = xs_[index] + ws_[index];
+    r.top = rc_.top + 2;
+    r.bottom = rc_.bottom - 2;
+    return r;
+}
+
 void TabStrip::setRect(const RECT& r) {
     rc_ = r;
     if (parent_) InvalidateRect(parent_, &rc_, FALSE);
 }
 
-void TabStrip::recomputeLayout() {
+void TabStrip::recomputeLayout() const {
     xs_.clear();
     ws_.clear();
     HDC dc = GetDC(parent_ ? parent_ : nullptr);

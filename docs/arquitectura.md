@@ -44,15 +44,39 @@ src/main.cpp                       (solo construye EditorApp y llama a run)
 ## Disposición de la ventana (`src/editor/layout.*`)
 
 `editor::Layout` es el **único sitio** donde se calculan los rectángulos de
-la división PLACE: `topBar` (barra superior), `dimensionStrip` (fila de
-atajos), `tabRow` (fila de pestañas PLACE/CODE/GUI), `leftPanel`
-(Properties), `rightPanel` (Explorer) y `viewport` (zona 3D). Los anchos de
-panel y el alto de la banda viven aquí (`kPropertiesWidth`, `kExplorerWidth`,
-`kTopBandHeight`, derivado de las filas de `WorkspaceTabs`); ningún otro
-archivo repite esas cifras. `Layout::compute(w, h)` recorta paneles y
-viewport con ventanas pequeñas para que `izquierda + viewport + derecha`
-sumen siempre el ancho de la ventana, y `inViewport(x, y)` da el test de
+la división PLACE: `topBar` (barra superior), `shortcutStrip` (fila de
+atajos dentro de la barra), `tabRow` (fila de pestañas PLACE/CODE/GUI),
+`dimensionBar` (tira de dimensiones a ancho completo, bajo la barra),
+`leftPanel` (Properties), `rightPanel` (Explorer) y `viewport` (zona 3D). Los
+anchos de panel y los altos de banda y tira viven aquí (`kPropertiesWidth`,
+`kExplorerWidth`, `kTopBandHeight` —derivado de las filas de
+`WorkspaceTabs`— y `kDimensionBarHeight`); ningún otro archivo repite esas
+cifras. `Layout::compute(w, h)` recorta paneles y viewport con ventanas
+pequeñas para que `izquierda + viewport + derecha` sumen siempre el ancho de
+la ventana, `contentTop()` es el borde inferior de la tira de dimensiones
+(donde empiezan paneles y viewport) e `inViewport(x, y)` da el test de
 picking/marquee. Es lógica pura, sin `windows.h`, y entra en `motorsk_model`.
+
+## Tira de dimensiones (`src/ui/dimensions_bar.*`)
+
+Bajo la barra superior, a ancho completo y sobre los paneles, vive la **tira
+de dimensiones**: una pestaña por cada `Dimension` del `World` (reutiliza el
+`TabStrip` del kit, `ui/kit/tab_strip.*`). Permite:
+
+- **Seleccionar** la dimensión activa (clic en la pestaña). Solo la dimensión
+  activa se dibuja y se puede elegir: `EditorApp` filtra `World::renderParts()`
+  y pasa el resto de dimensiones como `ignore` a `pickObjectExcept`, además de
+  filtrar el marquee. Las partes nuevas se crean bajo el `Workspace` de la
+  dimensión activa (`defaultParent()`).
+- **Crear** una dimensión con el botón `+` (`makeCreateDimensionCommand`):
+  construye la estructura completa (Workspace, Camera, Lighting con sus
+  efectos y Scripts) en un `World` temporal y la inserta como subárbol, así
+  que undo/redo la quita y la recrea con ids estables.
+- **Cerrar** con la `x` (pide confirmación y no deja cerrar la última) y
+  **renombrar** con doble clic (edición en línea). Todo pasa por comandos con
+  undo y guardado diferido.
+
+La dimensión activa es estado de interfaz (no se serializa en la escena).
 
 ## Panel Properties y panel Output (`src/ui/`)
 

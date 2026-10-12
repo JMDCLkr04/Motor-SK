@@ -114,9 +114,11 @@ void EditorApp::frameInteraction(const FrameCtx& ctx) {
             const bool ctrl = in.ctrl();
             InstanceId pickHit = kInvalidId;
             if (!ctrl) {
-                pickHit = pickObject(
-                    world_, rayFromCamera(camera_, ctx.aspect, 60.0f, *pressed,
-                                          ctx.vpW, ctx.vpH));
+                pickHit = pickObjectExcept(
+                    world_,
+                    rayFromCamera(camera_, ctx.aspect, 60.0f, *pressed,
+                                  ctx.vpW, ctx.vpH),
+                    hiddenFromActive());
             }
             selectionCtrl_.beginPress(*pressed, ctrl, pickHit);
         }
@@ -259,13 +261,22 @@ void EditorApp::frameInteraction(const FrameCtx& ctx) {
                 SelectionController::resolveMarquee(world_, ctx.viewProj, ds,
                                                     *released, ctx.vpW, ctx.vpH,
                                                     selection_, primary_);
+            // Solo los objetos de la dimension activa son seleccionables.
+            hits.erase(std::remove_if(hits.begin(), hits.end(),
+                                      [this](InstanceId id) {
+                                          return !inActiveDimension(id);
+                                      }),
+                       hits.end());
             SK_INFO("marquee -> %d objetos", static_cast<int>(hits.size()));
             applySelection(std::move(hits), primary_);
         } else {
-            // Click simple: el objeto mas cercano bajo el puntero.
-            const InstanceId hit = pickObject(
-                world_, rayFromCamera(camera_, ctx.aspect, 60.0f, *released,
-                                      ctx.vpW, ctx.vpH));
+            // Click simple: el objeto mas cercano bajo el puntero (solo la
+            // dimension activa).
+            const InstanceId hit = pickObjectExcept(
+                world_,
+                rayFromCamera(camera_, ctx.aspect, 60.0f, *released, ctx.vpW,
+                              ctx.vpH),
+                hiddenFromActive());
             SK_INFO("pick (%d,%d) -> %s", static_cast<int>(released->x),
                     static_cast<int>(released->y),
                     hit == kInvalidId ? "(nada)" : worldName(hit).c_str());
@@ -306,6 +317,7 @@ bool EditorApp::frameDraw(const FrameCtx& ctx) {
         modelCache_.reserve(parts.size());
         shapeCache_.reserve(parts.size());
         for (const RenderPart& part : parts) {
+            if (!inActiveDimension(part.id)) continue; // solo la dimension activa
             modelCache_.push_back(part.model);
             shapeCache_.push_back(part.shape);
         }

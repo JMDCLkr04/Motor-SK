@@ -86,6 +86,7 @@ add_executable(${PROJECT_NAME}
     src/ui/play_window.cpp
     src/ui/workspace_tabs.cpp
     src/ui/docs_view.cpp
+    src/ui/dimensions_bar.cpp
     src/ui/kit/paint_buffer.cpp
     src/ui/kit/place_popup.cpp
     src/ui/kit/icon_atlas.cpp

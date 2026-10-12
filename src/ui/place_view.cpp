@@ -308,7 +308,7 @@ void PlaceView::layoutChildren(int) {
 
 void PlaceView::layoutPanels(int width, int height) {
     if (!explorer_ || !properties_) return;
-    const int y = editor::Layout::topBandHeight();
+    const int y = editor::Layout::contentTopStatic();
     int panelH = height - y;
     if (panelH < 0) panelH = 0;
 

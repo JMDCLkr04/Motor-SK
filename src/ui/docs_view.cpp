@@ -230,7 +230,7 @@ void DocsView::updateDetails() {
 
 void DocsView::layout(int width, int height) {
     if (!hwnd_) return;
-    const int y = editor::Layout::topBandHeight();
+    const int y = editor::Layout::contentTopStatic();
     int h = height - y;
     if (h < 0) h = 0;
     MoveWindow(static_cast<HWND>(hwnd_), 0, y, width, h, TRUE);

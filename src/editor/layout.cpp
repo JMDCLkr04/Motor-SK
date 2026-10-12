@@ -24,11 +24,18 @@ Layout Layout::compute(int width, int height) {
         if (h < 0) h = 0;
         return {0, y, width, h};
     };
-    l.dimensionStrip = subBand(menuH, shortcutH);
+    l.shortcutStrip = subBand(menuH, shortcutH);
     l.tabRow = subBand(menuH + shortcutH, navbarH);
 
-    // Paneles laterales y viewport debajo de la barra.
-    const int panelY = kTopBandHeight;
+    // Tira de dimensiones: a ancho completo, bajo la barra superior. Si la
+    // ventana es muy baja se recorta para no salirse del area de cliente.
+    int dimH = kDimensionBarHeight;
+    if (band + dimH > height) dimH = height - band;
+    if (dimH < 0) dimH = 0;
+    l.dimensionBar = {0, band, width, dimH};
+
+    // Paneles laterales y viewport debajo de la tira de dimensiones.
+    const int panelY = band + dimH;
     int panelH = height - panelY;
     if (panelH < 0) panelH = 0;
 
@@ -44,7 +51,7 @@ Layout Layout::compute(int width, int height) {
 }
 
 bool Layout::inViewport(int px, int py) const {
-    return px >= viewport.x && px <= rightPanel.x && py >= topBar.bottom() &&
+    return px >= viewport.x && px <= rightPanel.x && py >= viewport.y &&
            py <= height;
 }
 

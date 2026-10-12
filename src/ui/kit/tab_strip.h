@@ -41,6 +41,8 @@ public:
 
     void paint(HDC hdc);
     TabHitResult hitTest(int x, int y);
+    // Rectangulo de la pestana "index" (para colocar un editor en linea).
+    RECT tabRect(int index) const;
     // La ventana anfitriona reenvia el raton.
     void onMouseMove(int x, int y);
     void onMouseLeave();
@@ -48,7 +50,7 @@ public:
     void onMouseWheel(int delta);
 
 private:
-    void recomputeLayout();
+    void recomputeLayout() const;
 
     HWND parent_ = nullptr;
     int id_ = 0;
@@ -56,13 +58,13 @@ private:
     std::vector<TabStripItem> items_;
     int selected_ = -1;
     RECT rc_ = {};
-    int offset_ = 0; // scroll horizontal (rueda) con muchas pestanas
+    mutable int offset_ = 0; // scroll horizontal (rueda) con muchas pestanas
     int hover_ = -1; // pestana bajo el raton
     bool hoverClose_ = false;
     bool hoverPlus_ = false;
-    std::vector<int> xs_; // x inicial de cada pestana (offset aplicado)
-    std::vector<int> ws_; // ancho de cada pestana
-    int plusX_ = 0;
+    mutable std::vector<int> xs_; // x inicial de cada pestana (offset aplicado)
+    mutable std::vector<int> ws_; // ancho de cada pestana
+    mutable int plusX_ = 0;
     std::function<void(int)> onSelected_;
     std::function<void(int)> onClose_;
     std::function<void()> onPlus_;

@@ -168,12 +168,15 @@ bool EditorApp::initialize() {
         workspace_.create(window_.nativeHandle()) &&
         place_.create(window_.nativeHandle()) &&
         code_.create(window_.nativeHandle()) &&
-        docs_.create(window_.nativeHandle());
+        docs_.create(window_.nativeHandle()) &&
+        dimsBar_.create(window_.nativeHandle());
     if (!created) {
         return false;
     }
     place_.setWorld(&world_);
     docs_.setVisible(false);
+    dimsBar_.setWorld(&world_);
+    dimsBar_.setVisible(false);
 
     wireUi();
 
@@ -195,6 +198,7 @@ bool EditorApp::initialize() {
 }
 
 void EditorApp::shutdown() {
+    dimsBar_.destroy();
     code_.destroy();
     docs_.destroy();
     place_.destroy();
@@ -248,6 +252,7 @@ void EditorApp::openProject(const std::string& folder) {
     world_.ensureStructure();                // garantiza la estructura base
     play_.close();
     undo_.clear(); // cada proyecto parte con historia nueva
+    activeDimension_ = kInvalidId; // refreshDimensionsBar elige la primera
     // Raices de los grupos sinteticos del Explorer: scripts del proyecto
     // y biblioteca de assets.
     place_.setScriptsRoot(sk::scripts::rootFolder(active_));
@@ -263,6 +268,7 @@ void EditorApp::openProject(const std::string& folder) {
     place_.setVisible(tab == 0);
     code_.setVisible(tab == 1);
     code_.open(active_);
+    refreshDimensionsBar(); // tira de dimensiones: primera activa + visibilidad
     SetWindowTextA(static_cast<HWND>(window_.nativeHandle()),
                    ("Motor SK - " + active_.name).c_str());
     logProjection_ = true;
@@ -277,6 +283,8 @@ void EditorApp::closeProject() {
     view3d_ = false;
     selection_.clear();
     primary_ = kInvalidId;
+    activeDimension_ = kInvalidId;
+    dimsBar_.setVisible(false);
     needsRedraw_ = true;
     panel_.setVisible(true);
     panel_.refresh();
@@ -296,9 +304,15 @@ std::string EditorApp::worldName(InstanceId id) const {
 }
 
 InstanceId EditorApp::defaultParent() const {
-    const std::vector<InstanceId> dims = world_.dimensions();
-    if (dims.empty()) return kInvalidId;
-    return world_.findChild(dims.front(), kWorkspaceName);
+    // El padre por defecto es el Workspace de la dimension activa (la que
+    // se esta viendo); si no hay activa, el de la primera dimension.
+    InstanceId dim = activeDimension_;
+    if (!world_.exists(dim)) {
+        const std::vector<InstanceId> dims = world_.dimensions();
+        if (dims.empty()) return kInvalidId;
+        dim = dims.front();
+    }
+    return world_.findChild(dim, kWorkspaceName);
 }
 
 Vec3 EditorApp::nextPartPos() const {
@@ -393,6 +407,7 @@ void EditorApp::doUndo() {
                                 : (ids.empty() ? kInvalidId : ids.front());
     place_.rebuildTree(world_);
     applySelection(std::move(ids), newPrimary);
+    refreshDimensionsBar();
     saveScene();
     logProjection_ = true;
     SK_INFO("undo");
@@ -410,9 +425,127 @@ void EditorApp::doRedo() {
                                 : (ids.empty() ? kInvalidId : ids.front());
     place_.rebuildTree(world_);
     applySelection(std::move(ids), newPrimary);
+    refreshDimensionsBar();
     saveScene();
     logProjection_ = true;
     SK_INFO("redo");
+}
+
+// --- Dimensiones -------------------------------------------------------
+
+bool EditorApp::inActiveDimension(InstanceId id) const {
+    if (activeDimension_ == kInvalidId) return true;
+    InstanceId cur = id;
+    while (cur != kInvalidId) {
+        if (cur == activeDimension_) return true;
+        const Instance* o = world_.find(cur);
+        cur = o ? o->parentId() : kInvalidId;
+    }
+    return false;
+}
+
+std::vector<InstanceId> EditorApp::hiddenFromActive() const {
+    std::vector<InstanceId> out;
+    if (activeDimension_ == kInvalidId) return out;
+    for (InstanceId d : world_.dimensions()) {
+        if (d == activeDimension_) continue;
+        for (InstanceId s : world_.subtree(d)) out.push_back(s);
+    }
+    return out;
+}
+
+void EditorApp::layoutDimensionsBar() {
+    const Layout layout = Layout::compute(window_.framebufferWidth(),
+                                          window_.framebufferHeight());
+    dimsBar_.resize(layout.dimensionBar.x, layout.dimensionBar.y,
+                    layout.dimensionBar.w, layout.dimensionBar.h);
+}
+
+void EditorApp::refreshDimensionsBar() {
+    const std::vector<InstanceId> dims = world_.dimensions();
+    if (!world_.exists(activeDimension_)) {
+        activeDimension_ = dims.empty() ? kInvalidId : dims.front();
+    }
+    dimsBar_.setWorld(&world_); // rellena las pestanas y marca la activa
+    layoutDimensionsBar();
+    dimsBar_.setVisible(view3d_);
+    SK_DEBUG("tira de dimensiones: %d, activa %s",
+             static_cast<int>(dims.size()), worldName(activeDimension_).c_str());
+}
+
+void EditorApp::setActiveDimension(InstanceId id) {
+    if (id != kInvalidId && !world_.exists(id)) return;
+    if (activeDimension_ == id) return;
+    activeDimension_ = id;
+    // La seleccion no puede quedar fuera de la dimension activa.
+    std::vector<InstanceId> keep;
+    for (InstanceId s : selection_) {
+        if (inActiveDimension(s)) keep.push_back(s);
+    }
+    const InstanceId newPrimary = inActiveDimension(primary_)
+                                      ? primary_
+                                      : (keep.empty() ? kInvalidId : keep.front());
+    applySelection(std::move(keep), newPrimary);
+    if (newPrimary == kInvalidId) place_.showNoSelection();
+    needsRedraw_ = true;
+    ++contentVersion_;
+    dimsBar_.setActive(id);
+    SK_INFO("dimension activa: %s", worldName(id).c_str());
+}
+
+void EditorApp::onCreateDimension() {
+    if (!view3d_) return;
+    InstanceId created = kInvalidId;
+    undo_.push(world_,
+               makeCreateDimensionCommand(world_, "Dimension", &created));
+    place_.rebuildTree(world_);
+    if (created != kInvalidId) {
+        activeDimension_ = created;
+        applySelection({}, kInvalidId);
+        place_.showNoSelection();
+    }
+    refreshDimensionsBar();
+    saveScene();
+    SK_INFO("Dimension creada: %s", worldName(created).c_str());
+}
+
+void EditorApp::onCloseDimension(InstanceId id) {
+    const Instance* dim = world_.find(id);
+    if (!dim) return;
+    if (world_.dimensions().size() <= 1) {
+        MessageBoxA(static_cast<HWND>(window_.nativeHandle()),
+                    "Debe quedar al menos una dimension.",
+                    "Cerrar dimension", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    const std::string name = dim->name();
+    const int r = MessageBoxA(
+        static_cast<HWND>(window_.nativeHandle()),
+        ("¿Cerrar la dimension \"" + name + "\" y todo su contenido?").c_str(),
+        "Cerrar dimension", MB_YESNO | MB_ICONQUESTION);
+    if (r != IDYES) return;
+
+    undo_.push(world_, makeRemoveCommand(world_, id));
+    if (!world_.exists(activeDimension_)) {
+        const std::vector<InstanceId> dims = world_.dimensions();
+        activeDimension_ = dims.empty() ? kInvalidId : dims.front();
+    }
+    place_.rebuildTree(world_);
+    applySelection({}, kInvalidId);
+    place_.showNoSelection();
+    refreshDimensionsBar();
+    saveScene();
+    SK_INFO("Dimension cerrada: %s", name.c_str());
+}
+
+void EditorApp::onRenameDimension(InstanceId id, const std::string& name) {
+    if (name.empty()) return;
+    std::string finalName;
+    if (!EditorCommands::rename(world_, undo_, id, name, finalName)) return;
+    place_.renameTreeItem(id, finalName);
+    dimsBar_.refresh(); // vuelve a leer los nombres del World
+    saveScene();
+    SK_INFO("dimension renombrada: %s", finalName.c_str());
 }
 
 } // namespace sk::editor

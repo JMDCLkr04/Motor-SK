@@ -196,6 +196,48 @@ void testUndoRedo() {
     (void)dim;
 }
 
+// --- Crear dimension como comando ---------------------------------------
+void testDimensionCommand() {
+    std::printf("testDimensionCommand\n");
+    World w;
+    w.ensureStructure();
+    const size_t before = w.dimensions().size();
+    UndoStack undo;
+
+    InstanceId created = kInvalidId;
+    undo.push(w, makeCreateDimensionCommand(w, "Nivel1", &created));
+    CHECK(created != kInvalidId);
+    CHECK(w.dimensions().size() == before + 1);
+    CHECK(w.find(created) != nullptr);
+    CHECK(w.find(created)->className() == "Dimension");
+    CHECK(w.find(created)->name() == "Nivel1");
+
+    // La dimension llega completa: Workspace, Camera, Lighting (con efectos)
+    // y Scripts.
+    CHECK(w.findChild(created, kWorkspaceName) != kInvalidId);
+    CHECK(w.findChild(created, kCameraName) != kInvalidId);
+    const InstanceId li = w.findChild(created, kLightingName);
+    CHECK(li != kInvalidId);
+    CHECK(w.findChild(li, "Sky") != kInvalidId);
+    CHECK(w.findChild(created, kScriptsName) != kInvalidId);
+
+    // Undo la quita entera; redo la recrea con el mismo id y estructura.
+    undo.undo(w);
+    CHECK(w.dimensions().size() == before);
+    CHECK(w.find(created) == nullptr);
+    undo.redo(w);
+    CHECK(w.dimensions().size() == before + 1);
+    CHECK(w.find(created) != nullptr);
+    CHECK(w.findChild(created, kWorkspaceName) != kInvalidId);
+    CHECK(w.findChild(created, kCameraName) != kInvalidId);
+
+    // El nombre no choca con el existente: se uniciza como Nivel1 (1).
+    InstanceId second = kInvalidId;
+    undo.push(w, makeCreateDimensionCommand(w, "Nivel1", &second));
+    CHECK(second != kInvalidId);
+    CHECK(w.find(second)->name() != w.find(created)->name());
+}
+
 // --- Tags + CollectionService -------------------------------------------
 void testTags() {
     std::printf("testTags\n");
@@ -760,25 +802,34 @@ void checkLayout(int w, int h) {
     CHECK(l.topBar.h <= Layout::kTopBandHeight);
 
     // Las sub-bandas viven dentro de la barra y no se solapan entre si.
-    CHECK(l.dimensionStrip.x == 0 && l.dimensionStrip.w == w);
+    CHECK(l.shortcutStrip.x == 0 && l.shortcutStrip.w == w);
     CHECK(l.tabRow.x == 0 && l.tabRow.w == w);
-    CHECK(l.dimensionStrip.y >= l.topBar.y);
-    CHECK(l.dimensionStrip.bottom() <= l.topBar.bottom());
+    CHECK(l.shortcutStrip.y >= l.topBar.y);
+    CHECK(l.shortcutStrip.bottom() <= l.topBar.bottom());
     CHECK(l.tabRow.bottom() <= l.topBar.bottom());
-    CHECK(!overlap(l.dimensionStrip, l.tabRow));
+    CHECK(!overlap(l.shortcutStrip, l.tabRow));
 
-    // Paneles y viewport: debajo de la barra, sin solaparse y sumando el
+    // La tira de dimensiones ocupa todo el ancho justo bajo la barra y por
+    // encima del contenido.
+    CHECK(l.dimensionBar.x == 0 && l.dimensionBar.w == w);
+    CHECK(l.dimensionBar.y >= l.topBar.bottom());
+    CHECK(l.dimensionBar.h <= Layout::kDimensionBarHeight);
+    CHECK(l.dimensionBar.bottom() == l.contentTop());
+
+    // Paneles y viewport: debajo de la tira, sin solaparse y sumando el
     // ancho de la ventana.
-    CHECK(l.leftPanel.y == Layout::kTopBandHeight);
-    CHECK(l.rightPanel.y == Layout::kTopBandHeight);
-    CHECK(l.viewport.y == Layout::kTopBandHeight);
+    CHECK(l.leftPanel.y == l.contentTop());
+    CHECK(l.rightPanel.y == l.contentTop());
+    CHECK(l.viewport.y == l.contentTop());
     CHECK(!overlap(l.leftPanel, l.rightPanel));
     CHECK(!overlap(l.leftPanel, l.viewport));
     CHECK(!overlap(l.rightPanel, l.viewport));
     CHECK(l.leftPanel.w + l.viewport.w + l.rightPanel.w == w);
-    // Viewport y barra no se pisan.
+    // Viewport/paneles y las bandas superiores no se pisan.
     CHECK(!overlap(l.viewport, l.topBar));
     CHECK(!overlap(l.leftPanel, l.topBar));
+    CHECK(!overlap(l.viewport, l.dimensionBar));
+    CHECK(!overlap(l.leftPanel, l.dimensionBar));
 
     // El viewport empieza justo tras el panel izquierdo.
     CHECK(l.viewport.x == l.leftPanel.right());
@@ -807,10 +858,12 @@ void testLayout() {
     CHECK(big.rightPanel.w == Layout::kExplorerWidth);
     CHECK(big.viewport.w ==
           1280 - Layout::kPropertiesWidth - Layout::kExplorerWidth);
-    CHECK(big.viewport.h == 720 - Layout::kTopBandHeight);
-    std::printf("  banda=%d props=%d explorer=%d viewport=%dx%d\n",
-                Layout::kTopBandHeight, big.leftPanel.w, big.rightPanel.w,
-                big.viewport.w, big.viewport.h);
+    CHECK(big.viewport.h ==
+          720 - Layout::kTopBandHeight - Layout::kDimensionBarHeight);
+    std::printf("  banda=%d tira=%d props=%d explorer=%d viewport=%dx%d\n",
+                Layout::kTopBandHeight, Layout::kDimensionBarHeight,
+                big.leftPanel.w, big.rightPanel.w, big.viewport.w,
+                big.viewport.h);
 }
 
 // La tabla unica de atajos (ShortcutMap) que comparten el manejador de
@@ -1009,6 +1062,7 @@ int main() {
     testProtected();
     testCloneSubtree();
     testUndoRedo();
+    testDimensionCommand();
     testTags();
     testCreateDimension();
     testMigrateV1();
