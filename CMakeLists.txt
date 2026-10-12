@@ -41,6 +41,7 @@ add_library(motorsk_model STATIC
     src/editor/editor_commands.cpp
     src/editor/clipboard_controller.cpp
     src/editor/layout.cpp
+    src/editor/shortcut_map.cpp
     src/ui/kit/tree_model.cpp
 )
 target_include_directories(motorsk_model PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -64,6 +65,10 @@ add_executable(${PROJECT_NAME}
     src/editor/gizmo_controller.cpp
     src/editor/object_drag_controller.cpp
     src/editor/selection_controller.cpp
+    src/editor/editor_app.cpp
+    src/editor/editor_app_ui.cpp
+    src/editor/editor_app_frame.cpp
+    src/editor/editor_app_interaction.cpp
     src/ui/code_view.cpp
     src/render/renderer.cpp
     src/render/meshes.cpp

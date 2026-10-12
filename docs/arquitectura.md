@@ -11,8 +11,13 @@ El código vive en `src/` agrupado por capas. La regla general es que cada
 capa depende solo de las de abajo:
 
 ```
-src/main.cpp
-   ├── editor/    (lógica pura del editor: layout de la ventana)
+src/main.cpp                       (solo construye EditorApp y llama a run)
+   └── editor/    (EditorApp + controladores + lógica pura del editor)
+         ├── editor_app.*          (estado y bucle principal; main queda en 8 líneas)
+         ├── layout.*              (rectángulos de la ventana)
+         ├── shortcut_map.*        (tabla única acción -> tecla)
+         ├── selection_controller / object_drag_controller / gizmo_controller
+         ├── clipboard_controller / editor_commands
    ├── ui/        (paneles Win32 + kit de widgets propio en ui/kit/)
    │     ├── place_view  (Properties | Output | Explorer)
    │     ├── docs_view   (Referencia de clases, lee ClassRegistry)
@@ -57,6 +62,61 @@ foco en cada frame. `newFrame()` limpia los fláncos al drenar la cola en
 `pumpEvents()`.
 
 
+## Controladores e `EditorCommands` (`src/editor/`)
+
+La lógica del editor se reparte en clases con dependencias explícitas (no
+conocen `EditorApp`, reciben `World`/selección por parámetro), de modo que
+cada una se prueba o se reutiliza por separado:
+
+- **`SelectionController`**: click, Ctrl+click (multi) y marquee. Guarda la
+  pulsación sin resolver (`pending`), decide el umbral de arrastre y clama el
+  rectángulo al `Layout::viewport`.
+- **`ObjectDragController`**: arrastre del grupo apoyándolo en la cara de lo
+  que tenga debajo (`surface snapping`) o en el suelo; guarda las poses
+  iniciales para el undo y para revertir con Esc.
+- **`GizmoController`**: ciclo de vida del `GizmoDrag` (begin/update/commit/
+  cancel) y el resaltado de eje bajo el puntero. No dibuja.
+- **`ClipboardController`**: portapapeles interno de subárboles (Ctrl+C/X/V);
+  guarda una copia por valor, de modo que cortar/borrar después no lo
+  invalida, y recuerda el padre común para el pegado.
+- **`EditorCommands`** (`struct` de métodos estáticos): Delete, Duplicate,
+  Group, Ungroup, Lock, Anchor, Rename y `bounds` (foco de cámara). Es la
+  **única implementación** de cada acción: la llaman por igual el atajo de
+  teclado, el botón y el menú.
+
+`ClipboardController` y `EditorCommands` solo dependen de la escena, así que
+viven en `motorsk_model`; los tres controladores de puntero enlazan con
+`buildGizmo`/`pickObject`/`computeSurfaceDrag` y van con el ejecutable.
+
+## `EditorApp` y `ShortcutMap`
+
+Tras el refactor, `src/main.cpp` tiene 8 líneas: construye `editor::EditorApp`
+y llama a `run(argc, argv)`. `EditorApp` es el **único dueño** del estado
+(ventana, renderer, `Config`, proyecto activo, `World`, `UndoStack`, paneles,
+selección por ids, objeto primario, cámara, controladores, cachés y flags) y
+del bucle principal. Se reparte en varios ficheros por responsabilidad:
+
+- `editor_app.cpp`: ciclo de vida (`run`/`initialize`/`shutdown`), parseo de
+  argumentos y helpers de proyecto/escena.
+- `editor_app_ui.cpp`: `wireUi()` (conexión de los `setOn…` de los paneles) y
+  los callbacks (`onAddPart`, `onFileCommand`, `onInsertClass`,
+  `onReparent`, ediciones de Properties, etc.).
+- `editor_app_frame.cpp`: el frame, los atajos dependientes del encuadre y el
+  dibujo de cámara. Un `FrameCtx` reúne lo que comparten
+  atajos/interacción/dibujo (`InputState`, viewProj, viewport, gizmo…).
+- `editor_app_interaction.cpp`: puntero (hover/press del gizmo, arrastre,
+  cursor, umbral y suelta) y el volcado de cachés/marquee/gizmo a pantalla.
+
+**`ShortcutMap`** (`shortcut_map.h/.cpp`, lógica pura) es la tabla única
+`acción -> tecla + modificadores`. El manejador de teclado y el diálogo
+"Personalizar atajos" (`Archivo > Atajos`) leen de aquí, así que no hay dos
+listas que se desincronicen. `matches()` acepta modificadores de más (para no
+romper combinaciones), `collisions()` detecta duplicados exactos y
+`describe()` da el texto del diálogo. `InputState` es puro (reedeclara las
+constantes `VK_*`, sin `windows.h`), por lo que el grep de aceptación de
+`GetAsyncKeyState`/`GetKeyState` da 0.
+
+
 ## Modelo de datos
 
 - **`Instance`** (`instance.h`): un nodo con `id` estable (los ids no se
@@ -93,7 +153,8 @@ foco en cada frame. `newFrame()` limpia los fláncos al drenar la cola en
 
 ## Flujo escena -> UI/render
 
-`main.cpp` registra los callbacks del `World` al abrir un proyecto:
+`EditorApp` registra los callbacks del `World` al abrir un proyecto (en
+`wireUi`, `editor_app_ui.cpp`):
 
 ```
 World.create(className, parent)
@@ -110,7 +171,7 @@ e id) solo cuando `renderDirty_`; los eventos la invalidan.
 
 ## Bucle de render bajo demanda
 
-El bucle de `main.cpp`:
+El bucle de `EditorApp::frame`, uno por iteración de `run`:
 
 1. Duerme en `MsgWaitForMultipleObjects` hasta que llega un mensaje de
    entrada, un `WM_PAINT` o un evento que cambie la escena.
@@ -171,7 +232,10 @@ arrastre (ciclo/protegido/él mismo/inexistente) y preorden estable aunque los
 eventos del `World` lleguen desordenados. Los
 límites de tiempo solo se exigen en compilación optimizada (`Release` /O2);
 bajo `_DEBUG` o ASan la instrumentación los hace no representativos y se mide
-sin afirmar.
+sin afirmar. También hay pruebas de la disposición de la ventana
+(`Layout`: en ventana pequeña y grande, los rectángulos no se solapan y
+`izquierda + viewport + derecha` suman el ancho) y de la tabla de atajos
+(`ShortcutMap`: sin colisiones, `find`/`matches` de cada combinación).
 
 Smoke test del editor:
 

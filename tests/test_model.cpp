@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "editor/layout.h"
+#include "editor/shortcut_map.h"
 #include "scene/commands.h"
 #include "scene/world.h"
 #include "ui/kit/tree_model.h"
@@ -809,11 +810,64 @@ void testLayout() {
                 big.viewport.w, big.viewport.h);
 }
 
+// La tabla unica de atajos (ShortcutMap) que comparten el manejador de
+// teclado y el dialogo "Personalizar atajos".
+void testShortcutMap() {
+    std::printf("testShortcutMap\n");
+    using sk::editor::ShortcutMap;
+
+    // La tabla por defecto no tiene dos atajos con la misma tecla + mods.
+    CHECK(ShortcutMap::collisions().empty());
+
+    // Cada accion documentada esta en la tabla; una desconocida no.
+    const char* actions[] = {
+        "tool1",   "tool2",    "tool3",  "tool4",   "undo",     "redo",
+        "rename",  "focus",    "copy",   "cut",     "paste",    "duplicate",
+        "rotateY", "rotateX",  "delete", "group",   "ungroup",  "lock",
+        "anchor",  "classes",  "escape"};
+    for (const char* a : actions) {
+        CHECK(ShortcutMap::find(a) != nullptr);
+    }
+    CHECK(ShortcutMap::find("no-existe") == nullptr);
+
+    // Las combinaciones del enunciado activan su accion.
+    CHECK(ShortcutMap::matches("copy", 'C', true, false, false));
+    CHECK(ShortcutMap::matches("group", 'G', true, false, false));
+    CHECK(ShortcutMap::matches("ungroup", 'U', true, false, false));
+    CHECK(ShortcutMap::matches("lock", 'L', true, false, false));
+    CHECK(ShortcutMap::matches("anchor", 'A', false, false, true));
+    CHECK(ShortcutMap::matches("classes", sk::editor::kKeyF1, false, false,
+                               false));
+    CHECK(ShortcutMap::matches("rename", sk::editor::kKeyF2, false, false,
+                               false));
+    CHECK(ShortcutMap::matches("delete", sk::editor::kKeyDelete, false, false,
+                               false));
+    CHECK(ShortcutMap::matches("undo", 'Z', true, false, false));
+    CHECK(ShortcutMap::matches("redo", 'Y', true, false, false));
+    CHECK(ShortcutMap::matches("tool2", '2', false, false, false));
+
+    // Los modificadores de mas no impiden el atajo (Ctrl+Shift+G agrupa).
+    CHECK(ShortcutMap::matches("group", 'G', true, true, true));
+    // Los que faltan si: G sola no agrupa; A con Ctrl no ancla.
+    CHECK(!ShortcutMap::matches("group", 'G', false, false, false));
+    CHECK(!ShortcutMap::matches("anchor", 'A', true, false, false));
+    // Otra tecla no coincide.
+    CHECK(!ShortcutMap::matches("group", 'H', true, false, false));
+
+    // Texto del dialogo: contiene las etiquetas y sus combinaciones.
+    const std::string text = ShortcutMap::describe();
+    CHECK(text.find("Agrupar") != std::string::npos);
+    CHECK(text.find("Ctrl+G") != std::string::npos);
+    CHECK(text.find("F1") != std::string::npos);
+    CHECK(text.find("Supr") != std::string::npos);
+}
+
 } // namespace
 
 int main() {
     testNameUniqueness();
     testLayout();
+    testShortcutMap();
     testReparentAndCycles();
     testProtected();
     testCloneSubtree();
