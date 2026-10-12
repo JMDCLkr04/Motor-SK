@@ -35,11 +35,13 @@ add_library(motorsk_model STATIC
     src/scene/shape.cpp
     src/scene/class_registry.cpp
     src/scene/instance.cpp
+    src/scene/property_value.cpp
     src/scene/collection_service.cpp
     src/scene/commands.cpp
     src/scene/world.cpp
     src/editor/editor_commands.cpp
     src/editor/clipboard_controller.cpp
+    src/editor/property_model.cpp
     src/editor/layout.cpp
     src/editor/shortcut_map.cpp
     src/ui/kit/tree_model.cpp

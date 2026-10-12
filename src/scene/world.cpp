@@ -1,5 +1,7 @@
 #include "world.h"
 
+#include "property_value.h"
+
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -31,116 +33,8 @@ bool startsWith(const std::string& s, const std::string& p) {
     return s.size() >= p.size() && s.compare(0, p.size(), p) == 0;
 }
 
-std::string trimNumber(double v) {
-    char buf[64];
-    std::snprintf(buf, sizeof(buf), "%.6g", v);
-    return buf;
-}
-
-bool parseVec3Text(const std::string& text, Vec3& out) {
-    std::string t = text;
-    for (char& c : t) {
-        if (c == ',') c = ' ';
-    }
-    std::istringstream ss(t);
-    float x = 0, y = 0, z = 0;
-    if (!(ss >> x)) return false;
-    ss >> y >> z;
-    out = {x, y, z};
-    return true;
-}
-
-// --- Valores por defecto / serializacion ---------------------------------
-long long defaultInt(const char* def) { return std::atoll(def ? def : "0"); }
-double defaultFloat(const char* def) { return std::atof(def ? def : "0"); }
-bool defaultBool(const char* def) {
-    return def && (std::strcmp(def, "true") == 0 || std::strcmp(def, "1") == 0);
-}
-
-std::string serializeVec3(const Vec3& v) {
-    return trimNumber(v.x) + " " + trimNumber(v.y) + " " + trimNumber(v.z);
-}
-
-std::string serializeValue(const PropertyValue& val, PropType type) {
-    switch (type) {
-        case PropType::Bool:   return val.b ? "true" : "false";
-        case PropType::Int:    return std::to_string(val.i);
-        case PropType::Float:  return trimNumber(val.f);
-        case PropType::String: return val.s;
-        case PropType::Vec3:   return serializeVec3(val.v);
-        case PropType::Color:  return serializeVec3(val.v);
-        case PropType::Enum:   return val.s;
-        case PropType::RefObject:
-            return val.ref == kInvalidId ? std::string()
-                                         : std::to_string(val.ref);
-    }
-    return {};
-}
-
-PropertyValue defaultValue(const PropertyDef& def) {
-    PropertyValue v;
-    switch (def.type) {
-        case PropType::Bool:  v.b = defaultBool(def.def); break;
-        case PropType::Int:   v.i = defaultInt(def.def); break;
-        case PropType::Float: v.f = defaultFloat(def.def); break;
-        case PropType::String: v.s = def.def ? def.def : ""; break;
-        case PropType::Vec3:
-        case PropType::Color: parseVec3Text(def.def ? def.def : "0 0 0", v.v); break;
-        case PropType::Enum:  v.s = def.def ? def.def : ""; break;
-        case PropType::RefObject: v.ref = kInvalidId; break;
-    }
-    return v;
-}
-
-bool parseValue(const std::string& text, PropType type, PropertyValue& out) {
-    switch (type) {
-        case PropType::Bool:
-            out.b = (text == "true" || text == "1");
-            break;
-        case PropType::Int:
-            out.i = std::atoll(text.c_str());
-            break;
-        case PropType::Float:
-            out.f = std::atof(text.c_str());
-            break;
-        case PropType::String:
-            out.s = text;
-            break;
-        case PropType::Vec3:
-        case PropType::Color:
-            parseVec3Text(text, out.v);
-            break;
-        case PropType::Enum:
-            out.s = text;
-            break;
-        case PropType::RefObject:
-            out.ref = text.empty() ? kInvalidId
-                                   : static_cast<InstanceId>(
-                                         std::strtoul(text.c_str(), nullptr, 10));
-            break;
-    }
-    return true;
-}
-
-// true si el valor difiere del default (para no escribir lo redundante en
-// el archivo v2).
-bool valueDiffersFromDefault(const PropertyValue& val, const PropertyDef& def) {
-    const PropertyValue defVal = defaultValue(def);
-    switch (def.type) {
-        case PropType::Bool:  return val.b != defVal.b;
-        case PropType::Int:   return val.i != defVal.i;
-        case PropType::Float: return std::abs(val.f - defVal.f) > 1e-6;
-        case PropType::String: return val.s != defVal.s;
-        case PropType::Vec3:
-        case PropType::Color:
-            return std::abs(val.v.x - defVal.v.x) > 1e-6 ||
-                   std::abs(val.v.y - defVal.v.y) > 1e-6 ||
-                   std::abs(val.v.z - defVal.v.z) > 1e-6;
-        case PropType::Enum:  return val.s != defVal.s;
-        case PropType::RefObject: return val.ref != defVal.ref;
-    }
-    return false;
-}
+// La conversion valor<->texto, los defaults y la comparacion viven en
+// property_value.{h,cpp} (modulo puro compartido con el panel Properties).
 
 } // namespace
 
@@ -544,6 +438,16 @@ bool World::setTransform(InstanceId id, const Vec3& position,
     return true;
 }
 
+bool World::setProperty(InstanceId id, const std::string& prop,
+                        const PropertyValue& value) {
+    Instance* i = find(id);
+    if (!i) return false;
+    const int ci = registry().indexOf(i->className());
+    const int slot = registry().valueIndex(ci, prop);
+    if (slot < 0) return false;
+    return setValue(id, slot, value);
+}
+
 bool World::setAttribute(InstanceId id, const Attribute& attr) {
     Instance* i = find(id);
     if (!i || attr.name.empty()) return false;
@@ -711,8 +615,9 @@ bool World::saveToFile(const std::string& path) const {
         for (int v = 0; v < count; ++v) {
             const PropertyDef& pd = reg.valueProp(ci, v);
             const PropertyValue& val = inst->valueBySlot(v);
-            if (!valueDiffersFromDefault(val, pd)) continue;
-            out << "prop: " << pd.name << "|" << serializeValue(val, pd.type)
+            if (!propertyValueDiffersFromDefault(val, pd)) continue;
+            out << "prop: " << pd.name << "|"
+                << serializePropertyValue(val, pd.type)
                 << "\n";
         }
         for (const Attribute& a : inst->getAttributes()) {
@@ -862,7 +767,8 @@ bool World::loadV2(const std::vector<std::string>& lines) {
             const int slot = reg.valueIndex(ci, kv.first);
             const PropertyDef* pd = reg.findProp(ci, kv.first);
             if (slot < 0 || !pd || pd->readOnly) continue;
-            parseValue(kv.second, pd->type, inst.mutableValues()[slot]);
+            parsePropertyValue(kv.second, pd->type,
+                               inst.mutableValues()[slot]);
         }
         inst.mutableAttributes() = r.attrs;
         inst.setTags(r.tags);

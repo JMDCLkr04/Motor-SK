@@ -103,6 +103,11 @@ public:
     bool setTransform(InstanceId id, const Vec3& position, const Vec3& rotation,
                       const Vec3& scale);
 
+    // Punto de entrada unico de Properties: escribe una propiedad por
+    // nombre respetando el tipo declarado en el registro. Emite onChanged.
+    bool setProperty(InstanceId id, const std::string& prop,
+                     const PropertyValue& value);
+
     // Attributes y Tags (actualizan el CollectionService y emiten).
     bool setAttribute(InstanceId id, const Attribute& attr);
     bool removeAttribute(InstanceId id, const std::string& name);

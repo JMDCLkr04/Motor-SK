@@ -13,8 +13,11 @@
 #include <vector>
 
 #include "editor/layout.h"
+#include "editor/output_buffer.h"
+#include "editor/property_model.h"
 #include "editor/shortcut_map.h"
 #include "scene/commands.h"
+#include "scene/property_value.h"
 #include "scene/world.h"
 #include "ui/kit/tree_model.h"
 
@@ -862,12 +865,146 @@ void testShortcutMap() {
     CHECK(text.find("Supr") != std::string::npos);
 }
 
+// Modelo puro de Properties: comunes a la seleccion, "mixto", "por
+// defecto" y filtro del buscador.
+void testPropertyModel() {
+    std::printf("testPropertyModel\n");
+    World w;
+    w.ensureStructure();
+    const InstanceId ws = workspaceOf(w);
+    const InstanceId a = w.create("Part", ws);
+    const InstanceId b = w.create("Part", ws);
+    const ClassRegistry& reg = w.registry();
+
+    auto findRow = [](const std::vector<PropertyRow>& rows,
+                      const char* n) -> const PropertyRow* {
+        for (const PropertyRow& r : rows) {
+            if (r.name == n) return &r;
+        }
+        return nullptr;
+    };
+
+    std::vector<PropertyRow> rows =
+        buildPropertyRows(reg, {w.find(a), w.find(b)});
+
+    // Name/Parent no son filas normales (el panel los pinta aparte).
+    CHECK(findRow(rows, "Name") == nullptr);
+    CHECK(findRow(rows, "Parent") == nullptr);
+
+    // Size identico en ambas (los valores arrancan a cero, como siempre).
+    const PropertyRow* size = findRow(rows, "Size");
+    CHECK(size != nullptr);
+    CHECK(size && !size->mixed);
+    CHECK(size && size->value == "0 0 0");
+    CHECK(size && size->section == "Transform");
+    CHECK(size && size->type == PropType::Vec3);
+    // El default del registro (4, 1.2, 2) difiere del valor actual: el
+    // panel mostraria "restaurar".
+    CHECK(size && !size->isDefault);
+
+    // Orientation arranca a cero, que SI coincide con su default.
+    const PropertyRow* orient = findRow(rows, "Orientation");
+    CHECK(orient != nullptr);
+    CHECK(orient && !orient->mixed);
+    CHECK(orient && orient->isDefault);
+
+    // Position se eleva al crear: comun pero distinta del default.
+    const PropertyRow* pos = findRow(rows, "Position");
+    CHECK(pos != nullptr);
+    CHECK(pos && !pos->mixed);
+    CHECK(pos && !pos->isDefault);
+
+    // Secciones presentes.
+    std::vector<std::string> sections = propertyRowSections(rows);
+    CHECK(std::find(sections.begin(), sections.end(), "Transform") !=
+          sections.end());
+    CHECK(std::find(sections.begin(), sections.end(), "Appearance") !=
+          sections.end());
+    CHECK(std::find(sections.begin(), sections.end(), "Collision") !=
+          sections.end());
+    CHECK(std::find(sections.begin(), sections.end(), "Data") !=
+          sections.end());
+
+    // Solo en una Part cambia el tamano -> "mixto", sin valor y no default.
+    PropertyValue pv;
+    pv.v = Vec3{2.0f, 2.0f, 2.0f};
+    CHECK(w.setProperty(a, "Size", pv));
+    rows = buildPropertyRows(reg, {w.find(a), w.find(b)});
+    size = findRow(rows, "Size");
+    CHECK(size != nullptr);
+    CHECK(size && size->mixed);
+    CHECK(size && !size->isDefault);
+    CHECK(size && size->value.empty());
+
+    // Buscador: solo "Size" contiene "size".
+    std::vector<PropertyRow> filtered =
+        buildPropertyRows(reg, {w.find(a)}, "size");
+    CHECK(filtered.size() == 1);
+    if (filtered.size() == 1) CHECK(filtered[0].name == "Size");
+
+    // Restaurar: el valor por defecto del registro no difiere de si mismo.
+    const int ci = reg.indexOf("Part");
+    const PropertyDef* def = reg.findProp(ci, "Size");
+    CHECK(def != nullptr);
+    if (def) {
+        CHECK(!propertyValueDiffersFromDefault(defaultPropertyValue(*def),
+                                               *def));
+    }
+
+    // Serializacion / lectura del texto canonico.
+    PropertyValue parsed;
+    CHECK(parsePropertyValue("1, 2, 3", PropType::Vec3, parsed));
+    CHECK(parsed.v.x == 1.0f && parsed.v.y == 2.0f && parsed.v.z == 3.0f);
+    CHECK(serializePropertyValue(parsed, PropType::Vec3) == "1 2 3");
+    CHECK(!parsePropertyValue("no-numero", PropType::Vec3, parsed));
+    CHECK(serializePropertyValue(defaultPropertyValue(*def), PropType::Vec3) ==
+          "4 1.2 2");
+}
+
+// Buffer circular del panel Output (limite 5.000 lineas).
+void testOutputBuffer() {
+    std::printf("testOutputBuffer\n");
+    OutputBuffer buf;
+    CHECK(buf.capacity() == OutputBuffer::kDefaultCapacity);
+    CHECK(buf.capacity() == 5000);
+
+    for (int i = 0; i < 5001; ++i) {
+        buf.add(i % 3, "l" + std::to_string(i));
+    }
+    CHECK(buf.size() == 5000);
+    CHECK(buf.dropped() == 1);
+    CHECK(buf.at(0).text == "l1");
+    CHECK(buf.at(4999).text == "l5000");
+
+    // Los tres niveles se conservan.
+    buf.clear();
+    CHECK(buf.size() == 0);
+    CHECK(buf.dropped() == 0);
+    buf.add(0, "info");
+    buf.add(1, "aviso");
+    buf.add(2, "error");
+    CHECK(buf.size() == 3);
+    CHECK(buf.at(0).level == 0);
+    CHECK(buf.at(1).level == 1);
+    CHECK(buf.at(2).level == 2);
+
+    // Capacidad pequena: se descarta lo mas antiguo.
+    OutputBuffer small(3);
+    for (int i = 0; i < 5; ++i) small.add(0, std::to_string(i));
+    CHECK(small.size() == 3);
+    CHECK(small.dropped() == 2);
+    CHECK(small.at(0).text == "2");
+    CHECK(small.at(2).text == "4");
+}
+
 } // namespace
 
 int main() {
     testNameUniqueness();
     testLayout();
     testShortcutMap();
+    testPropertyModel();
+    testOutputBuffer();
     testReparentAndCycles();
     testProtected();
     testCloneSubtree();
