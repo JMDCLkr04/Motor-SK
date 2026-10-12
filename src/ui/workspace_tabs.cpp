@@ -574,7 +574,7 @@ bool WorkspaceTabs::create(void* parentHwnd) {
     HINSTANCE inst = GetModuleHandleW(nullptr);
 
     hwnd_ = CreateWindowExA(0, kTabsClass, "", WS_CHILD,
-                            0, 0, rc.right, kTopBandHeight, parent, nullptr,
+                            0, 0, rc.right, kBandHeight, parent, nullptr,
                             inst, this);
     if (!hwnd_) {
         SK_ERROR("WorkspaceTabs: CreateWindowEx fallo (error %lu)", GetLastError());
@@ -867,7 +867,7 @@ void WorkspaceTabs::setTool(int tool) {
 
 void WorkspaceTabs::resize(int width, int height) {
     if (!hwnd_) return;
-    const int bandHeight = (height < kTopBandHeight) ? height : kTopBandHeight;
+    const int bandHeight = (height < kBandHeight) ? height : kBandHeight;
     MoveWindow(static_cast<HWND>(hwnd_), 0, 0, width, bandHeight, TRUE);
 
     if (fileButton_) {

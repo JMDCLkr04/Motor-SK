@@ -14,6 +14,7 @@
 #include "../core/log.h"
 #include "class_picker.h"
 #include "dark_button.h"
+#include "../editor/layout.h"
 #include "theme.h"
 #include "workspace_tabs.h"
 
@@ -376,11 +377,11 @@ bool PlaceView::create(void* parentHwnd) {
 
     explorer_ = CreateWindowExA(0, kPanelClass, "Explorer",
                                 WS_CHILD | WS_CLIPCHILDREN,
-                                0, 0, kExplorerWidth, 100, parent, nullptr,
+                                0, 0, editor::Layout::explorerWidth(), 100, parent, nullptr,
                                 inst, this);
     properties_ = CreateWindowExA(0, kPanelClass, "Properties",
                                   WS_CHILD | WS_CLIPCHILDREN | WS_VSCROLL,
-                                  0, 0, kPropertiesWidth, 100, parent, nullptr,
+                                  0, 0, editor::Layout::propertiesWidth(), 100, parent, nullptr,
                                   inst, this);
     if (!explorer_ || !properties_) {
         SK_ERROR("PlaceView: CreateWindowEx fallo (error %lu)", GetLastError());
@@ -392,7 +393,7 @@ bool PlaceView::create(void* parentHwnd) {
     // "+" solo en la fila bajo el raton, renombrado en linea y arrastrar y
     // soltar con fila fantasma y tres zonas).
     treeWidget_.create(static_cast<HWND>(explorer_), 6, kHeaderHeight + 6,
-                       kExplorerWidth - 12, 100);
+                       editor::Layout::explorerWidth() - 12, 100);
     treeWidget_.setModel(&treeModel_);
     treeWidget_.setOnSelectionChanged(
         [this](const std::vector<ui::NodeId>&) { notifySelection(); });
@@ -428,7 +429,7 @@ bool PlaceView::create(void* parentHwnd) {
         0, "EDIT", "",
         WS_CHILD | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL |
             ES_LEFT,
-        6, kHeaderHeight + 6, kPropertiesWidth - 12, 100,
+        6, kHeaderHeight + 6, editor::Layout::propertiesWidth() - 12, 100,
         static_cast<HWND>(properties_),
         reinterpret_cast<HMENU>(static_cast<INT_PTR>(3)), inst, nullptr);
     output_ = output;
@@ -447,7 +448,7 @@ bool PlaceView::create(void* parentHwnd) {
                12, kHeaderHeight + 8, 70, 20, theme::uiFont());
     HWND nameField =
         makeEdit(hprop, inst, kIdStatus, "Sin objeto seleccionado",
-                 84, kHeaderHeight + 8, kPropertiesWidth - 96, 20);
+                 84, kHeaderHeight + 8, editor::Layout::propertiesWidth() - 96, 20);
     EnableWindow(nameField, FALSE); // hasta que haya un objeto seleccionado
     makeStatic(hprop, inst, kIdTransform, "Transform",
                34, 0, 200, 22, theme::uiHeaderFont());
@@ -477,13 +478,13 @@ bool PlaceView::create(void* parentHwnd) {
     makeStatic(hprop, inst, kIdParentLabel, "Parent",
                12, 0, 70, 20, theme::uiFont());
     makeStatic(hprop, inst, kIdParentValue, "-",
-               84, 0, kPropertiesWidth - 96, 20, theme::uiFont());
+               84, 0, editor::Layout::propertiesWidth() - 96, 20, theme::uiFont());
 
     // ClassName (solo lectura)
     makeStatic(hprop, inst, kIdLblClassName, "ClassName",
                12, 0, 70, 20, theme::uiFont());
     makeStatic(hprop, inst, kIdClassName, "-",
-               84, 0, kPropertiesWidth - 96, 20, theme::uiFont());
+               84, 0, editor::Layout::propertiesWidth() - 96, 20, theme::uiFont());
 
     // Appearance: CastShadow (checkbox), Reflectance (edit), Transparency (edit)
     makeStatic(hprop, inst, kIdLblAppearance, "Appearance",
@@ -506,7 +507,7 @@ bool PlaceView::create(void* parentHwnd) {
     makeStatic(hprop, inst, kIdLblShape, "Shape",
                54, 0, 70, 20, theme::uiFont());
     makeStatic(hprop, inst, kIdShape, "-",
-               84, 0, kPropertiesWidth - 96, 20, theme::uiFont());
+               84, 0, editor::Layout::propertiesWidth() - 96, 20, theme::uiFont());
 
     // Data: Locked (checkbox)
     makeStatic(hprop, inst, kIdLblData, "Data",
@@ -564,7 +565,7 @@ bool PlaceView::create(void* parentHwnd) {
         WS_EX_CLIENTEDGE, "EDIT", "",
         WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_TABSTOP | ES_MULTILINE |
             ES_AUTOVSCROLL | ES_LEFT | ES_WANTRETURN,
-        12, 0, kPropertiesWidth - 30, 66, hprop,
+        12, 0, editor::Layout::propertiesWidth() - 30, 66, hprop,
         reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdAttributes)), inst,
         nullptr);
     SendMessageA(attrEdit, WM_SETFONT, reinterpret_cast<WPARAM>(theme::uiFont()),
@@ -577,7 +578,7 @@ bool PlaceView::create(void* parentHwnd) {
         WS_EX_CLIENTEDGE, "EDIT", "",
         WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_TABSTOP | ES_MULTILINE |
             ES_AUTOVSCROLL | ES_LEFT | ES_WANTRETURN,
-        12, 0, kPropertiesWidth - 30, 54, hprop,
+        12, 0, editor::Layout::propertiesWidth() - 30, 54, hprop,
         reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdTags)), inst, nullptr);
     SendMessageA(tagsEdit, WM_SETFONT, reinterpret_cast<WPARAM>(theme::uiFont()),
                  TRUE);
@@ -586,7 +587,7 @@ bool PlaceView::create(void* parentHwnd) {
 
     resize(rc.right, rc.bottom);
     SK_INFO("Paneles PLACE listos (Properties %d izq + Explorer %d der)",
-            kPropertiesWidth, kExplorerWidth);
+            editor::Layout::propertiesWidth(), editor::Layout::explorerWidth());
     return true;
 }
 
@@ -947,7 +948,7 @@ void PlaceView::layoutProperties() {
     // pintan en WM_PAINT restando scrollY_.
     const int vscrollW = GetSystemMetrics(SM_CXVSCROLL);
     const int boxX = 6;
-    const int boxRight = kPropertiesWidth - vscrollW - 6;
+    const int boxRight = editor::Layout::propertiesWidth() - vscrollW - 6;
     const int boxW = boxRight - boxX;
     const int labelX = boxX + 22;  // separado del triangulito de cascada
     const int labelW = 82;
@@ -1220,18 +1221,18 @@ void PlaceView::scrollBy(int dy) {
 
 void PlaceView::layoutPanels(int width, int height) {
     if (!explorer_ || !properties_) return;
-    const int y = WorkspaceTabs::kTopBandHeight;
+    const int y = editor::Layout::topBandHeight();
     int panelH = height - y;
     if (panelH < 0) panelH = 0;
 
     // Properties a la izquierda, Explorer a la derecha.
-    MoveWindow(static_cast<HWND>(properties_), 0, y, kPropertiesWidth, panelH, TRUE);
+    MoveWindow(static_cast<HWND>(properties_), 0, y, editor::Layout::propertiesWidth(), panelH, TRUE);
     MoveWindow(static_cast<HWND>(explorer_),
-               width - kExplorerWidth, y, kExplorerWidth, panelH, TRUE);
+               width - editor::Layout::explorerWidth(), y, editor::Layout::explorerWidth(), panelH, TRUE);
 
     if (treeWidget_.hwnd()) {
         MoveWindow(treeWidget_.hwnd(), 6, kHeaderHeight + 6,
-                   kExplorerWidth - 12, panelH - kHeaderHeight - 12, TRUE);
+                   editor::Layout::explorerWidth() - 12, panelH - kHeaderHeight - 12, TRUE);
     }
 
     // El alto del panel cambio: se reenmarca el scroll y se recoloca.

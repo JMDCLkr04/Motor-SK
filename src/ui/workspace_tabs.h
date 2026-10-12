@@ -36,8 +36,10 @@ public:
     // el nombre abajo; la navbar ocupa el resto (banda total de 116px).
     static constexpr int kShortcutHeight = 54;
     static constexpr int kNavbarHeight = 32;
-    // Alto total de la banda: los paneles PLACE/CODE empiezan aqui.
-    static constexpr int kTopBandHeight =
+    // Alto total de la banda (los paneles PLACE/CODE empiezan aqui). La
+    // cifra la expone editor::Layout, que es la fuente unica de la
+    // disposicion; aqui solo interesa para recortar los controles.
+    static constexpr int kBandHeight =
         kMenuBarHeight + kShortcutHeight + kNavbarHeight;
 
     bool create(void* parentHwnd);
@@ -98,7 +100,7 @@ public:
     void setOnStop(std::function<void()> cb) { onStop_ = std::move(cb); }
 
     // width/height son los de la ventana principal; la barra solo usa
-    // kTopBandHeight de alto.
+    // kBandHeight de alto.
     void resize(int width, int height);
 
 private:

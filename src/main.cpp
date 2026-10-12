@@ -14,6 +14,7 @@
 
 #include "core/config.h"
 #include "core/log.h"
+#include "editor/layout.h"
 #include "math/math.h"
 #include "platform/window.h"
 #include "project/project.h"
@@ -1067,12 +1068,10 @@ int main(int argc, char** argv) {
     sk::InstanceId lastTipsPrimary = sk::kInvalidId;
     auto inViewport = [&](const sk::Vec2& p) {
         if (!view3d || !place.visible()) return false;
-        const float x0 = static_cast<float>(sk::PlaceView::kPropertiesWidth);
-        const float x1 = static_cast<float>(window.framebufferWidth()) -
-                         static_cast<float>(sk::PlaceView::kExplorerWidth);
-        const float y0 = static_cast<float>(sk::WorkspaceTabs::kTopBandHeight);
-        return p.x >= x0 && p.x <= x1 && p.y >= y0 &&
-               p.y <= static_cast<float>(window.framebufferHeight());
+        const sk::editor::Layout layout = sk::editor::Layout::compute(
+            window.framebufferWidth(), window.framebufferHeight());
+        return layout.inViewport(static_cast<int>(p.x),
+                                 static_cast<int>(p.y));
     };
 
     // Re-agrupar desde el Explorer: soltar X sobre Y (Inside) deja a X
@@ -2029,15 +2028,12 @@ int main(int argc, char** argv) {
                 float y0 = std::fmin(dragStart.y, released->y);
                 float x1 = std::fmax(dragStart.x, released->x);
                 float y1 = std::fmax(dragStart.y, released->y);
-                const float vx0 = static_cast<float>(sk::PlaceView::kPropertiesWidth);
-                const float vx1 = static_cast<float>(vpW) -
-                                  static_cast<float>(sk::PlaceView::kExplorerWidth);
-                const float vy0 = static_cast<float>(sk::WorkspaceTabs::kTopBandHeight);
-                const float vy1 = static_cast<float>(vpH);
-                x0 = std::fmax(x0, vx0);
-                y0 = std::fmax(y0, vy0);
-                x1 = std::fmin(x1, vx1);
-                y1 = std::fmin(y1, vy1);
+                const sk::editor::Layout vpLayout =
+                    sk::editor::Layout::compute(vpW, vpH);
+                x0 = std::fmax(x0, static_cast<float>(vpLayout.viewport.x));
+                y0 = std::fmax(y0, static_cast<float>(vpLayout.topBar.bottom()));
+                x1 = std::fmin(x1, static_cast<float>(vpLayout.rightPanel.x));
+                y1 = std::fmin(y1, static_cast<float>(vpH));
                 std::vector<sk::InstanceId> hits;
                 if (x0 < x1 && y0 < y1) {
                     hits = sk::selectInRect(world, viewProj,
@@ -2151,12 +2147,11 @@ int main(int argc, char** argv) {
                 float y0 = std::fmin(dragStart.y, pos.y);
                 float x1 = std::fmax(dragStart.x, pos.x);
                 float y1 = std::fmax(dragStart.y, pos.y);
-                x0 = std::fmax(x0, static_cast<float>(
-                                       sk::PlaceView::kPropertiesWidth));
-                y0 = std::fmax(y0, static_cast<float>(
-                                       sk::WorkspaceTabs::kTopBandHeight));
-                x1 = std::fmin(x1, static_cast<float>(
-                                       vpW - sk::PlaceView::kExplorerWidth));
+                const sk::editor::Layout vpLayout =
+                    sk::editor::Layout::compute(vpW, vpH);
+                x0 = std::fmax(x0, static_cast<float>(vpLayout.viewport.x));
+                y0 = std::fmax(y0, static_cast<float>(vpLayout.topBar.bottom()));
+                x1 = std::fmin(x1, static_cast<float>(vpLayout.rightPanel.x));
                 y1 = std::fmin(y1, static_cast<float>(vpH));
                 marquee.valid = true;
                 marquee.x0 = x0;

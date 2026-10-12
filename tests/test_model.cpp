@@ -12,6 +12,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "editor/layout.h"
 #include "scene/commands.h"
 #include "scene/world.h"
 #include "ui/kit/tree_model.h"
@@ -736,10 +737,83 @@ void testTreeIcons() {
         (int)script);
 }
 
+// --- Layout ---------------------------------------------------------------
+using sk::editor::Layout;
+using sk::editor::Rect;
+
+bool overlap(const Rect& a, const Rect& b) {
+    return !(a.right() <= b.x || b.right() <= a.x || a.bottom() <= b.y ||
+             b.bottom() <= a.y);
+}
+
+void checkLayout(int w, int h) {
+    const Layout l = Layout::compute(w, h);
+    CHECK(l.width == w);
+    CHECK(l.height == h);
+
+    // La barra empieza en 0 y ocupa todo el ancho.
+    CHECK(l.topBar.x == 0 && l.topBar.y == 0 && l.topBar.w == w);
+    CHECK(l.topBar.h <= Layout::kTopBandHeight);
+
+    // Las sub-bandas viven dentro de la barra y no se solapan entre si.
+    CHECK(l.dimensionStrip.x == 0 && l.dimensionStrip.w == w);
+    CHECK(l.tabRow.x == 0 && l.tabRow.w == w);
+    CHECK(l.dimensionStrip.y >= l.topBar.y);
+    CHECK(l.dimensionStrip.bottom() <= l.topBar.bottom());
+    CHECK(l.tabRow.bottom() <= l.topBar.bottom());
+    CHECK(!overlap(l.dimensionStrip, l.tabRow));
+
+    // Paneles y viewport: debajo de la barra, sin solaparse y sumando el
+    // ancho de la ventana.
+    CHECK(l.leftPanel.y == Layout::kTopBandHeight);
+    CHECK(l.rightPanel.y == Layout::kTopBandHeight);
+    CHECK(l.viewport.y == Layout::kTopBandHeight);
+    CHECK(!overlap(l.leftPanel, l.rightPanel));
+    CHECK(!overlap(l.leftPanel, l.viewport));
+    CHECK(!overlap(l.rightPanel, l.viewport));
+    CHECK(l.leftPanel.w + l.viewport.w + l.rightPanel.w == w);
+    // Viewport y barra no se pisan.
+    CHECK(!overlap(l.viewport, l.topBar));
+    CHECK(!overlap(l.leftPanel, l.topBar));
+
+    // El viewport empieza justo tras el panel izquierdo.
+    CHECK(l.viewport.x == l.leftPanel.right());
+    CHECK(l.rightPanel.right() == w);
+
+    // inViewport coincide con los limites del viewport.
+    if (l.viewport.w > 0 && l.viewport.h > 0) {
+        CHECK(l.inViewport(l.viewport.x, l.viewport.y));
+        CHECK(l.inViewport(l.viewport.right(), l.viewport.bottom() - 1));
+        CHECK(!l.inViewport(l.leftPanel.x, l.viewport.y));
+        CHECK(!l.inViewport(l.viewport.x, l.topBar.y));
+    }
+}
+
+void testLayout() {
+    std::printf("testLayout\n");
+    // Ventana grande y ventana pequena (mas estrecha que los paneles).
+    const int sizes[][2] = {{1280, 720}, {1920, 1080}, {640, 480}, {200, 120},
+                            {300, 116}, {100, 40}};
+    for (const int* s : sizes) {
+        checkLayout(s[0], s[1]);
+    }
+    // En la ventana estandar los paneles conservan su ancho nominal.
+    const Layout big = Layout::compute(1280, 720);
+    CHECK(big.leftPanel.w == Layout::kPropertiesWidth);
+    CHECK(big.rightPanel.w == Layout::kExplorerWidth);
+    CHECK(big.viewport.w ==
+          1280 - Layout::kPropertiesWidth - Layout::kExplorerWidth);
+    CHECK(big.viewport.h == 720 - Layout::kTopBandHeight);
+    std::printf("  banda=%d props=%d explorer=%d viewport=%dx%d\n",
+                Layout::kTopBandHeight, big.leftPanel.w, big.rightPanel.w,
+                big.viewport.w, big.viewport.h);
+}
+
 } // namespace
 
 int main() {
     testNameUniqueness();
+    testLayout();
     testReparentAndCycles();
     testProtected();
     testCloneSubtree();

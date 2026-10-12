@@ -35,9 +35,6 @@ struct RowBand {
 // las propiedades de la Instance seleccionada por id.
 class PlaceView {
 public:
-    static constexpr int kExplorerWidth = 260;
-    static constexpr int kPropertiesWidth = 300;
-
     bool create(void* parentHwnd);
     void destroy();
 
@@ -59,7 +56,7 @@ public:
     bool visible() const { return visible_; }
 
     // width/height son los de la ventana principal; los paneles ocupan
-    // desde WorkspaceTabs::kTopBandHeight hasta el borde inferior.
+    // desde editor::Layout::topBandHeight() hasta el borde inferior.
     void resize(int width, int height);
 
     // Reconstruye todo el arbol a partir del World y su jerarquia. Util

@@ -6,6 +6,7 @@
 #include <string>
 
 #include "../core/log.h"
+#include "../editor/layout.h"
 #include "../project/project.h"
 #include "../project/scripts.h"
 #include "dark_button.h"
@@ -299,7 +300,7 @@ void CodeView::resize(int width, int height) {
 
 void CodeView::layoutPanels(int width, int height) {
     if (!scriptsPanel_ || !propsPanel_) return;
-    const int y = WorkspaceTabs::kTopBandHeight;
+    const int y = editor::Layout::topBandHeight();
     int panelH = height - y;
     if (panelH < 0) panelH = 0;
 

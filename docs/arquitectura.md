@@ -12,6 +12,7 @@ capa depende solo de las de abajo:
 
 ```
 src/main.cpp
+   ├── editor/    (lógica pura del editor: layout de la ventana)
    ├── ui/        (paneles Win32 + kit de widgets propio en ui/kit/)
    │     ├── place_view  (Properties | Output | Explorer)
    │     ├── docs_view   (Referencia de clases, lee ClassRegistry)
@@ -27,8 +28,23 @@ src/main.cpp
    └── math/      (Vec2/Vec3/Mat4 propias, estilo glm)
 ```
 
-`src/scene/` es la única capa con **tests unitarios** (`tests/test_model.cpp`);
-el resto es UI/render y se prueba con smoke tests (ver "Cómo probar").
+`src/scene/` y `src/editor/` son capas con **tests unitarios**
+(`tests/test_model.cpp`); el resto es UI/render y se prueba con smoke tests
+(ver "Cómo probar").
+
+## Disposición de la ventana (`src/editor/layout.*`)
+
+`editor::Layout` es el **único sitio** donde se calculan los rectángulos de
+la división PLACE: `topBar` (barra superior), `dimensionStrip` (fila de
+atajos), `tabRow` (fila de pestañas PLACE/CODE/GUI), `leftPanel`
+(Properties), `rightPanel` (Explorer) y `viewport` (zona 3D). Los anchos de
+panel y el alto de la banda viven aquí (`kPropertiesWidth`, `kExplorerWidth`,
+`kTopBandHeight`, derivado de las filas de `WorkspaceTabs`); ningún otro
+archivo repite esas cifras. `Layout::compute(w, h)` recorta paneles y
+viewport con ventanas pequeñas para que `izquierda + viewport + derecha`
+sumen siempre el ancho de la ventana, y `inViewport(x, y)` da el test de
+picking/marquee. Es lógica pura, sin `windows.h`, y entra en `motorsk_model`.
+
 
 ## Modelo de datos
 
