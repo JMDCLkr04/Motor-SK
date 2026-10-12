@@ -342,18 +342,8 @@ void EditorApp::applySelection(std::vector<InstanceId> ids,
     needsRedraw_ = true;
     ++contentVersion_; // el contorno de seleccion cambia
     place_.syncTreeSelection(primary_);
-    if (selection_.empty()) {
-        place_.showNoSelection();
-    } else if (selection_.size() == 1) {
-        const Instance* object = world_.find(selection_.front());
-        if (object) {
-            place_.showObject(*object);
-        } else {
-            place_.showNoSelection();
-        }
-    } else {
-        place_.showMultiple(static_cast<int>(selection_.size()));
-    }
+    // El panel recibe la lista completa y decide filas comunes / "mixto".
+    place_.showSelection(selection_);
 }
 
 bool EditorApp::inViewport(const Vec2& p) const {

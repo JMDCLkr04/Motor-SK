@@ -79,6 +79,9 @@ add_executable(${PROJECT_NAME}
     src/ui/prompt.cpp
     src/ui/script_picker.cpp
     src/ui/place_view.cpp
+    src/ui/properties_panel.cpp
+    src/ui/properties_panel_paint.cpp
+    src/ui/output_panel.cpp
     src/ui/class_picker.cpp
     src/ui/play_window.cpp
     src/ui/workspace_tabs.cpp

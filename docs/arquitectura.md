@@ -15,17 +15,21 @@ src/main.cpp                       (solo construye EditorApp y llama a run)
    └── editor/    (EditorApp + controladores + lógica pura del editor)
          ├── editor_app.*          (estado y bucle principal; main queda en 8 líneas)
          ├── layout.*              (rectángulos de la ventana)
+         ├── property_model.*      (filas de Properties: comunes, "mixto", default)
+         ├── output_buffer.h       (buffer circular del panel Output)
          ├── shortcut_map.*        (tabla única acción -> tecla)
          ├── selection_controller / object_drag_controller / gizmo_controller
          ├── clipboard_controller / editor_commands
    ├── ui/        (paneles Win32 + kit de widgets propio en ui/kit/)
-   │     ├── place_view  (Properties | Output | Explorer)
+   │     ├── place_view       (Properties | Output | Explorer)
+   │     ├── properties_panel (formulario generado desde ClassRegistry)
+   │     ├── output_panel     (log con buffer circular de 5.000 líneas)
    │     ├── docs_view   (Referencia de clases, lee ClassRegistry)
    │     ├── code_view   (organizador de scripts)
    │     ├── projects_panel, play_window ...
    │     └── kit/        (widgets GDI propios: ver más abajo)
    ├── scene/     (World/Instance, commands, ClassRegistry, cámara, picking,
-   │               gizmo, snapping, CollectionService)
+   │               gizmo, snapping, CollectionService, property_value)
    ├── render/    (renderer Vulkan: swapchain, pipeline, rejilla, contorno)
    ├── project/   (proyecto.sk, CRUD de carpetas de scripts)
    ├── platform/  (ventana Win32 e input, capa portable)
@@ -49,6 +53,33 @@ archivo repite esas cifras. `Layout::compute(w, h)` recorta paneles y
 viewport con ventanas pequeñas para que `izquierda + viewport + derecha`
 sumen siempre el ancho de la ventana, y `inViewport(x, y)` da el test de
 picking/marquee. Es lógica pura, sin `windows.h`, y entra en `motorsk_model`.
+
+## Panel Properties y panel Output (`src/ui/`)
+
+El panel izquierdo de PLACE tiene dos pestañas, **Properties** y **Output**,
+ambas widgets propios dibujados a mano (sin un `HWND` por campo):
+
+- **`PropertiesPanel`** (`properties_panel.*`) genera las filas a partir del
+  `ClassRegistry`: para la selección actual pide las filas a
+  `property_model.*` (`buildPropertyRows`), las agrupa en cajitas por sección
+  (orden canónico en `propertySectionOrder`), y pinta etiqueta, valor, resalte
+  de "mixto", botón de restaurar (solo si el valor difiere del default) y
+  tooltip con la descripción del registro. Solo la fila en edición es un
+  `EDIT` superpuesto; los `Bool` llevan su propia casilla y los `Vec3` se
+  pueden desplegar por eje. Los cambios salen por un único
+  `onPropertyEdited(id, nombre, PropertyValue)`.
+- **`OutputPanel`** (`output_panel.*`) es una lista virtualizada alimentada
+  por `editor/output_buffer.h` (`OutputBuffer`, tope de 5.000 líneas
+  circulares), con color por nivel (info/aviso/error), autoscroll que se
+  pausa al subir y botón "Limpiar". `EditorApp` conecta el sink de
+  `SK_INFO/WARN/ERROR` a `PlaceView::appendOutput`.
+
+La lógica de valores (serialización, parseo, default y "mixto") vive en
+`scene/property_value.*`, compartida con `World`; así el panel y el guardado
+de escena usan exactamente el mismo formato. Añadir una propiedad a una clase
+del registro basta para que aparezca en Properties, en la Referencia de clases
+(`docs_view`, que también lee `ClassRegistry`) y en el archivo de escena
+(`World` serializa iterando `valueCount`/`valueProp`).
 
 ## Input por eventos (`src/platform/input_state.*`)
 

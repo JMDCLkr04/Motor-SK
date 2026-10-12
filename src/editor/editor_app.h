@@ -106,12 +106,12 @@ private:
     void onInsertClass(InstanceId parentId, const std::string& className);
     void onDeleteRequested(const std::vector<InstanceId>& ids);
     void onReparent(InstanceId child, InstanceId parent, int index);
-    void onTransformEdited(InstanceId id, int fieldId, float value);
-    void onBoolEdited(InstanceId id, int fieldId, bool value);
-    void onFloatEdited(InstanceId id, int fieldId, float value);
-    void onPivotEdited(InstanceId id, int fieldId, float value);
-    void onAttributesEdited(InstanceId id, const std::string& text);
-    void onTagsEdited(InstanceId id, const std::string& text);
+    void onPropertyEdited(InstanceId id, const std::string& prop,
+                          const PropertyValue& value);
+    void onAttributeSet(InstanceId id, const Attribute& attr);
+    void onAttributeRemoved(InstanceId id, const std::string& name);
+    void onTagAdded(InstanceId id, const std::string& tag);
+    void onTagRemoved(InstanceId id, const std::string& tag);
 
     // --- Estado ---
     Window window_;

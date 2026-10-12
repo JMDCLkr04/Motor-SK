@@ -15,6 +15,7 @@
 
 #include "../core/log.h"
 #include "../project/scripts.h"
+#include "../scene/property_value.h"
 #include "../scene/shape.h"
 #include "../ui/prompt.h"
 
@@ -95,32 +96,34 @@ void EditorApp::wireUi() {
         place_.showNoSelection();
     });
 
-    place_.setOnTransformEdited(
-        [this](InstanceId id, int fieldId, float value) {
-            onTransformEdited(id, fieldId, value);
+    // Properties: una unica ruta para toda fila editable (Position, Size,
+    // Orientation, bools, floats, enums, ...). El panel entrega ya el
+    // PropertyValue tipado.
+    place_.setOnPropertyEdited(
+        [this](InstanceId id, const std::string& prop,
+               const PropertyValue& value) {
+            onPropertyEdited(id, prop, value);
         });
 
     // Properties Nombre editable: al perder el foco o con Enter se
     // renombra el objeto en el World, en el Explorer y en los paneles.
     place_.setOnNameEdited([this](InstanceId id, const std::string& newName) {
-        return doRename(id, newName);
+        doRename(id, newName);
     });
 
-    place_.setOnBoolEdited([this](InstanceId id, int fieldId, bool value) {
-        onBoolEdited(id, fieldId, value);
+    // Attributes y Tags: operaciones granulares (fila a fila).
+    place_.setOnAttributeSet([this](InstanceId id, const Attribute& attr) {
+        onAttributeSet(id, attr);
     });
-    place_.setOnFloatEdited([this](InstanceId id, int fieldId, float value) {
-        onFloatEdited(id, fieldId, value);
+    place_.setOnAttributeRemoved(
+        [this](InstanceId id, const std::string& name) {
+            onAttributeRemoved(id, name);
+        });
+    place_.setOnTagAdded([this](InstanceId id, const std::string& tag) {
+        onTagAdded(id, tag);
     });
-    place_.setOnPivotEdited([this](InstanceId id, int fieldId, float value) {
-        onPivotEdited(id, fieldId, value);
-    });
-    place_.setOnAttributesEdited([this](InstanceId id,
-                                        const std::string& text) {
-        onAttributesEdited(id, text);
-    });
-    place_.setOnTagsEdited([this](InstanceId id, const std::string& text) {
-        onTagsEdited(id, text);
+    place_.setOnTagRemoved([this](InstanceId id, const std::string& tag) {
+        onTagRemoved(id, tag);
     });
 
     // Boton "+" del Explorer: inserta una clase bajo el nodo indicado.
@@ -396,198 +399,67 @@ void EditorApp::onReparent(InstanceId child, InstanceId parent, int index) {
             worldName(parent).c_str());
 }
 
-// Properties Transform editable: al perder el foco un campo se aplica al
-// objeto, se guarda la escena y se reescriben los campos con el formato
-// normalizado.
-void EditorApp::onTransformEdited(InstanceId id, int fieldId, float value) {
+// Properties: entrada unica para toda fila editable. El panel entrega el
+// PropertyValue ya tipado; aqui se comprueba que cambia, se aplica como
+// comando (undo + guardado) y se deja que el panel relea el valor canonico.
+void EditorApp::onPropertyEdited(InstanceId id, const std::string& prop,
+                                 const PropertyValue& value) {
     Instance* object = world_.find(id);
     if (!object) return;
-    const int row = (fieldId - 200) / 3;
-    const int axis = (fieldId - 200) % 3;
-    static const char* kRows[] = {"position", "size", "orientation"};
-    static const char* kAxes[] = {"x", "y", "z"};
-    Vec3 p = object->position();
-    Vec3 r = object->rotation();
-    Vec3 s = object->scale();
-    Vec3* target = &p;
-    if (row == 1) target = &s;      // Size
-    else if (row == 2) target = &r; // Orientation
-    if (std::fabs((&target->x)[axis] - value) < 1e-6f) {
+    const int ci = world_.registry().indexOf(object->className());
+    const int slot = world_.registry().valueIndex(ci, prop);
+    if (slot < 0) return;
+    const PropertyDef& def = world_.registry().valueProp(ci, slot);
+    const PropertyValue cur = object->valueBySlot(slot);
+    if (serializePropertyValue(cur, def.type) ==
+        serializePropertyValue(value, def.type)) {
         return; // sin cambio: no ensucia la historia ni guarda
     }
-    (&target->x)[axis] = value;
-    undo_.push(world_, makeTransformCommand(world_, id, p, r, s));
+    undo_.push(world_, makePropertyCommand(world_, id, prop, value));
     saveScene();
-    if (const Instance* o = world_.find(id)) place_.showObject(*o);
-    SK_INFO("Properties %s: %s.%s = %.3g", worldName(id).c_str(), kRows[row],
-            kAxes[axis], value);
+    SK_INFO("Properties %s: %s", worldName(id).c_str(), prop.c_str());
 }
 
-// Properties checkboxes (ids del panel: 400 CastShadow, 401 Locked,
-// 402 CanCollide, 403 Anchored): se aplican al objeto y se guarda.
-void EditorApp::onBoolEdited(InstanceId id, int fieldId, bool value) {
+// Attributes: alta o modificacion de un atributo concreto.
+void EditorApp::onAttributeSet(InstanceId id, const Attribute& attr) {
     Instance* object = world_.find(id);
-    if (!object) return;
-    const char* field = nullptr;
-    bool def = false;
-    switch (fieldId) {
-    case 400: field = "CastShadow"; def = true; break;
-    case 401: field = "Locked"; def = false; break;
-    case 402: field = "CanCollide"; def = true; break;
-    case 403: field = "Anchored"; def = false; break;
-    default: return;
+    if (!object || attr.name.empty()) return;
+    if (object->hasAttribute(attr.name) &&
+        object->getAttribute(attr.name) == attr) {
+        return; // sin cambio
     }
-    if (object->propBool(field, def) == value) {
-        return; // sin cambio: no ensucia la historia ni guarda
-    }
-    PropertyValue pv;
-    pv.b = value;
-    undo_.push(world_, makePropertyCommand(world_, id, field, pv));
+    undo_.push(world_, makeAttributeCommand(world_, id, attr, false));
     saveScene();
-    SK_INFO("Properties %s: %s = %s", worldName(id).c_str(), field,
-            value ? "true" : "false");
+    SK_INFO("Attribute %s de %s", attr.name.c_str(), worldName(id).c_str());
 }
 
-// Properties Reflectance (410) / Transparency (411): el panel ya reclama
-// el valor a 0..1; aqui se aplica y se reescriben los campos.
-void EditorApp::onFloatEdited(InstanceId id, int fieldId, float value) {
+// Attributes: baja de un atributo.
+void EditorApp::onAttributeRemoved(InstanceId id, const std::string& name) {
     Instance* object = world_.find(id);
-    if (!object) return;
-    const char* field = nullptr;
-    if (fieldId == 410) field = "Reflectance";
-    else if (fieldId == 411) field = "Transparency";
-    else return;
-    if (std::fabs(object->propFloat(field) - value) < 1e-6f) {
-        return; // sin cambio: no ensucia la historia ni guarda
-    }
-    PropertyValue pv;
-    pv.f = value;
-    undo_.push(world_, makePropertyCommand(world_, id, field, pv));
+    if (!object || !object->hasAttribute(name)) return;
+    Attribute attr = object->getAttribute(name);
+    undo_.push(world_, makeAttributeCommand(world_, id, attr, true));
     saveScene();
-    if (const Instance* o = world_.find(id)) place_.showObject(*o);
-    SK_INFO("Properties %s: %s = %.2f", worldName(id).c_str(), field, value);
+    SK_INFO("Attribute %s de %s eliminado", name.c_str(),
+            worldName(id).c_str());
 }
 
-// Properties Pivot (500..502 Position, 503..505 Orientation): mueve el
-// origen de la part sin tocar su position en el mundo.
-void EditorApp::onPivotEdited(InstanceId id, int fieldId, float value) {
+// Tags: alta de una etiqueta.
+void EditorApp::onTagAdded(InstanceId id, const std::string& tag) {
     Instance* object = world_.find(id);
-    if (!object) return;
-    const int idx = fieldId - 500;
-    if (idx < 0 || idx >= 6) return;
-    const char* field = idx < 3 ? "PivotPosition" : "PivotRotation";
-    Vec3 v = object->propVec3(field);
-    if (std::fabs((&v.x)[idx % 3] - value) < 1e-6f) {
-        return; // sin cambio: no ensucia la historia ni guarda
-    }
-    (&v.x)[idx % 3] = value;
-    PropertyValue pv;
-    pv.v = v;
-    undo_.push(world_, makePropertyCommand(world_, id, field, pv));
+    if (!object || tag.empty() || object->hasTag(tag)) return;
+    undo_.push(world_, makeTagCommand(world_, id, tag, true));
     saveScene();
-    if (const Instance* o = world_.find(id)) place_.showObject(*o);
-    SK_INFO("Properties %s: pivot[%d] = %.3g", worldName(id).c_str(), idx,
-            value);
+    SK_INFO("Tag %s de %s", tag.c_str(), worldName(id).c_str());
 }
 
-// Attributes: parsea "nombre | tipo | valor" por linea al objeto.
-void EditorApp::onAttributesEdited(InstanceId id, const std::string& text) {
+// Tags: baja de una etiqueta.
+void EditorApp::onTagRemoved(InstanceId id, const std::string& tag) {
     Instance* object = world_.find(id);
-    if (!object) return;
-    std::vector<Attribute> parsed;
-    std::string line;
-    std::istringstream stream(text);
-    while (std::getline(stream, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        // Recorta y salta lineas vacias.
-        size_t a = line.find_first_not_of(" \t");
-        if (a == std::string::npos) continue;
-        size_t b = line.find_last_not_of(" \t");
-        line = line.substr(a, b - a + 1);
-        if (line.empty()) continue;
-        Attribute attr;
-        size_t p1 = line.find('|');
-        size_t p2 = p1 == std::string::npos ? std::string::npos
-                                            : line.find('|', p1 + 1);
-        if (p1 == std::string::npos) {
-            attr.name = line;
-        } else if (p2 == std::string::npos) {
-            attr.name = line.substr(0, p1);
-            attr.value = line.substr(p1 + 1);
-        } else {
-            attr.name = line.substr(0, p1);
-            attr.type = line.substr(p1 + 1, p2 - p1 - 1);
-            attr.value = line.substr(p2 + 1);
-        }
-        auto trim = [](std::string s) {
-            size_t f = s.find_first_not_of(" \t");
-            size_t l = s.find_last_not_of(" \t");
-            return f == std::string::npos ? std::string()
-                                          : s.substr(f, l - f + 1);
-        };
-        attr.name = trim(attr.name);
-        attr.type = trim(attr.type);
-        attr.value = trim(attr.value);
-        if (attr.type.empty()) attr.type = "text";
-        if (!attr.name.empty()) parsed.push_back(std::move(attr));
-    }
-    if (parsed == object->getAttributes()) return;
-    std::vector<CommandPtr> parts;
-    for (const Attribute& old : object->getAttributes()) {
-        bool still = false;
-        for (const Attribute& n : parsed) {
-            if (n.name == old.name) {
-                still = true;
-                break;
-            }
-        }
-        if (!still) {
-            parts.push_back(makeAttributeCommand(world_, id, old, true));
-        }
-    }
-    for (const Attribute& n : parsed) {
-        const Attribute prev = object->getAttribute(n.name);
-        const bool present = object->hasAttribute(n.name);
-        if (!present || !(prev == n)) {
-            parts.push_back(makeAttributeCommand(world_, id, n, false));
-        }
-    }
-    if (parts.empty()) return;
-    undo_.push(world_, makeCompoundCommand(std::move(parts)));
+    if (!object || !object->hasTag(tag)) return;
+    undo_.push(world_, makeTagCommand(world_, id, tag, false));
     saveScene();
-    SK_INFO("Attributes de %s actualizados", worldName(id).c_str());
-}
-
-// Tags: una etiqueta por linea.
-void EditorApp::onTagsEdited(InstanceId id, const std::string& text) {
-    Instance* object = world_.find(id);
-    if (!object) return;
-    std::vector<std::string> tags;
-    std::string line;
-    std::istringstream stream(text);
-    while (std::getline(stream, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        size_t a = line.find_first_not_of(" \t");
-        if (a == std::string::npos) continue;
-        size_t b = line.find_last_not_of(" \t");
-        tags.push_back(line.substr(a, b - a + 1));
-    }
-    if (tags == object->getTags()) return;
-    std::vector<CommandPtr> parts;
-    for (const std::string& old : object->getTags()) {
-        if (std::find(tags.begin(), tags.end(), old) == tags.end()) {
-            parts.push_back(makeTagCommand(world_, id, old, false));
-        }
-    }
-    for (const std::string& t : tags) {
-        if (!object->hasTag(t)) {
-            parts.push_back(makeTagCommand(world_, id, t, true));
-        }
-    }
-    if (parts.empty()) return;
-    undo_.push(world_, makeCompoundCommand(std::move(parts)));
-    saveScene();
-    SK_INFO("Tags de %s actualizados", worldName(id).c_str());
+    SK_INFO("Tag %s de %s eliminado", tag.c_str(), worldName(id).c_str());
 }
 
 } // namespace sk::editor
