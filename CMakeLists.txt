@@ -53,6 +53,7 @@ add_executable(${PROJECT_NAME}
     src/main.cpp
     src/core/config.cpp
     src/platform/window.cpp
+    src/platform/input_state.cpp
     src/project/project.cpp
     src/project/scripts.cpp
     src/scene/picking.cpp

@@ -3,12 +3,15 @@
 #include <optional>
 
 #include "../math/math.h"
+#include "input_state.h"
 
 namespace sk {
 
 // Ventana Win32 con estado de input para la cámara libre.
-// El teclado (WASD/shift) se consulta con GetAsyncKeyState; el ratón
-// (clicks, rueda, deltas de movimiento) llega por mensajes.
+// El teclado (WASD/shift) se mantiene por eventos WM_KEYDOWN/WM_KEYUP en
+// input(); el ratón (clicks, rueda, deltas de movimiento) llega por
+// mensajes. Ya no se consultan las APIs de teclado ni el foco en cada
+// frame: el estado lo mantiene InputState por eventos.
 class Window {
 public:
     Window() = default;
@@ -35,16 +38,11 @@ public:
     void setQuitOnClose(bool value) { quitOnClose_ = value; }
     bool closed() const { return closed_; }
 
-    bool keyDown(int vk) const;
-
-    // true si esta ventana es la de primer plano: el teclado no debe
-    // mover la camara ni disparar atajos cuando el usuario esta en otra
-    // aplicacion (WASD dejaba de funcionar solo, pero al reves no).
-    bool hasFocus() const;
-
-    // true si el foco de teclado esta en un campo de texto (EDIT): la
-    // camara y los atajos numericos se pausan mientras se escribe.
-    bool textInputFocused() const;
+    // Estado del teclado y del foco, actualizado por eventos. Sustituye a
+    // keyDown()/hasFocus()/textInputFocused(): down()/pressed()/ctrl()...
+    // leen el estado cacheado; active() es la ventana en primer plano y
+    // textFocus() si el teclado esta en un campo de texto (EDIT).
+    const InputState& input() const { return input_; }
 
     bool mouseRightDown() const { return rmbDown_; }
     bool mouseLeftDown() const { return lmbDown_; }
@@ -87,6 +85,8 @@ private:
 
     void* hwnd_ = nullptr;
     void* instance_ = nullptr;
+
+    InputState input_;
 
     bool shouldClose_ = false;
     bool closed_ = false;

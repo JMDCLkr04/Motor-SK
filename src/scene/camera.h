@@ -11,9 +11,9 @@ class Camera {
 public:
     void update(float dt, const Window& window) {
         // Otra app en primer plano: el teclado no mueve la camara
-        // (GetAsyncKeyState es global) y los deltas acumulados se
+        // (el input se mantiene por eventos) y los deltas acumulados se
         // descartan para que no se salten al volver.
-        if (!window.hasFocus()) {
+        if (!window.input().active()) {
             window.consumeMouseDelta();
             window.consumeWheel();
             return;
@@ -41,18 +41,18 @@ public:
         // W/S adelante/atras, A/D strafe, Q/E bajar/subir, Shift rapido.
         // Se pausan mientras el foco esta en un campo de texto (los campos
         // Transform de Properties); escribir "w" ahi no debe mover la vista.
-        if (!window.textInputFocused()) {
+        if (!window.input().textFocus()) {
             Vec3 right = cross(forward(), kUp);
             Vec3 move{};
-            if (window.keyDown('W')) move += forward();
-            if (window.keyDown('S')) move -= forward();
-            if (window.keyDown('D')) move += right;
-            if (window.keyDown('A')) move -= right;
-            if (window.keyDown('E')) move += kUp;
-            if (window.keyDown('Q')) move -= kUp;
+            if (window.input().down('W')) move += forward();
+            if (window.input().down('S')) move -= forward();
+            if (window.input().down('D')) move += right;
+            if (window.input().down('A')) move -= right;
+            if (window.input().down('E')) move += kUp;
+            if (window.input().down('Q')) move -= kUp;
 
             float speed = kMoveSpeed;
-            if (window.keyDown(kKeyShift)) speed *= 3.0f;
+            if (window.input().down(kKeyShift)) speed *= 3.0f;
 
             if (length(move) > 0.0f) {
                 position_ += normalize(move) * (speed * dtScale);

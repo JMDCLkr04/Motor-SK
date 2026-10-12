@@ -45,6 +45,17 @@ viewport con ventanas pequeñas para que `izquierda + viewport + derecha`
 sumen siempre el ancho de la ventana, y `inViewport(x, y)` da el test de
 picking/marquee. Es lógica pura, sin `windows.h`, y entra en `motorsk_model`.
 
+## Input por eventos (`src/platform/input_state.*`)
+
+`InputState` concentra el estado del teclado y del foco. `Window` lo
+actualiza al recibir los mensajes (`WM_KEYDOWN`/`WM_KEYUP`, `WM_ACTIVATE`,
+`WM_SETFOCUS`/`WM_KILLFOCUS`) y el resto del código solo lee:
+`down(vk)` (tecla mantenida), `pressed(vk)` (flánco del frame),
+`ctrl()/shift()/alt()` (modificadores) y `active()`/`textFocus()` (primer
+plano y campo de texto). Ya no se consultan las API Win32 de teclado ni el
+foco en cada frame. `newFrame()` limpia los fláncos al drenar la cola en
+`pumpEvents()`.
+
 
 ## Modelo de datos
 

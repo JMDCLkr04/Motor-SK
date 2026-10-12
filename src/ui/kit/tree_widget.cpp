@@ -696,8 +696,8 @@ LRESULT CALLBACK TreeWidget::wndProc(HWND hwnd, UINT msg, WPARAM wParam,
                     return 0;
                 }
             }
-            const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-            const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+            const bool ctrl = (wParam & MK_CONTROL) != 0;
+            const bool shift = (wParam & MK_SHIFT) != 0;
             if (shift && self->anchor_ != 0) {
                 int a = self->rowOf(self->anchor_);
                 int b = row;

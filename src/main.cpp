@@ -993,34 +993,10 @@ int main(int argc, char** argv) {
     const double startTime = nowSeconds();
     double lastTime = startTime;
     int frame = 0;
-    bool escWasDown = false;
-    bool camKeysWasDown = false;
-    int toolKeyWasDown = 0;
-    bool deleteKeyWasDown = false;
-    // Portapapeles interno de subarboles (Ctrl+C/X) y estado de flancos de
-    // los atajos de copia/pega/clonado/rotacion.
+    // Portapapeles interno de subarboles (Ctrl+C/X). Los flancos de los
+    // atajos los lleva InputState (window.input()), no banderas locales.
     std::vector<std::vector<sk::Instance>> clipboard;
     bool clipboardFromCut = false;
-    bool copyKeyWasDown = false;
-    bool pasteKeyWasDown = false;
-    bool cutKeyWasDown = false;
-    bool dupKeyWasDown = false;
-    bool rotYKeyWasDown = false;
-    bool rotXKeyWasDown = false;
-    bool undoKeyWasDown = false;
-    bool redoKeyWasDown = false;
-    bool f2KeyWasDown = false;
-    bool fKeyWasDown = false;
-    bool f1KeyWasDown = false;
-    bool groupKeyWasDown = false;
-    bool ungroupKeyWasDown = false;
-    bool lockKeyWasDown = false;
-    bool anchorKeyWasDown = false;
-    auto edge = [](bool now, bool& was) {
-        const bool rising = now && !was;
-        was = now;
-        return rising;
-    };
 
     // Arrastre de seleccion (marquee) en el viewport de PLACE.
     bool dragPending = false;  // pressed dentro del viewport, sin mover
@@ -1142,6 +1118,8 @@ int main(int argc, char** argv) {
     };
 
     while (window.pumpEvents() && (maxFrames < 0 || frame < maxFrames)) {
+        // Estado de teclado/foco del frame (por eventos, ver InputState).
+        const sk::InputState& in = window.input();
         if (window.consumeResized()) {
             SK_INFO("resize: %dx%d", window.framebufferWidth(), window.framebufferHeight());
             renderer.invalidateSwapchain();
@@ -1172,16 +1150,16 @@ int main(int argc, char** argv) {
 
         // Esc: cancela el arrastre del gizmo si esta en curso; si no, el
         // del objeto; si no, el marquee; si no, vuelve al panel de
-        // proyectos. Solo con la ventana enfocada (keyDown usa
-        // GetAsyncKeyState, que es global).
-        const bool escDown = window.keyDown(VK_ESCAPE) && window.hasFocus();
-        if (escDown && !escWasDown && gizmoDrag.active) {
+        // proyectos. Solo con la ventana en primer plano (InputState
+        // mantiene el estado por eventos).
+        const bool escPressed = in.pressed(VK_ESCAPE) && in.active();
+        if (escPressed && gizmoDrag.active) {
             sk::gizmoRevert(gizmoDrag, world);
             gizmoDrag.active = false;
             lastTipsTool = -1; // las puntas vuelven a su sitio
             SK_INFO("gizmo cancelado");
             applySelection(selection, primary);
-        } else if (escDown && !escWasDown && objDragActive) {
+        } else if (escPressed && objDragActive) {
             // Revierte el arrastre del objeto a sus poses de inicio
             // (posicion y rotacion: el snap de superficie puede haber
             // girado el grupo).
@@ -1197,16 +1175,14 @@ int main(int argc, char** argv) {
             dragPending = false;
             SK_INFO("drag cancelado");
             applySelection(selection, primary);
-        } else if (escDown && !escWasDown && (dragPending || dragActive)) {
+        } else if (escPressed && (dragPending || dragActive)) {
             dragPending = false;
             dragActive = false;
             SK_INFO("marquee cancelado");
-        } else if (escDown && !escWasDown) {
+        } else if (escPressed) {
             closeProject();
-            escWasDown = escDown;
             continue;
         }
-        escWasDown = escDown;
 
         const double now = nowSeconds();
         float dt = static_cast<float>(now - lastTime);
@@ -1230,47 +1206,39 @@ int main(int argc, char** argv) {
         // Log al empezar a mover la camara (mismo criterio de foco que
         // Camera::update): las pruebas comprueban que WASD/Q/E no
         // funcionan con otra aplicacion en primer plano.
-        const bool camKeys = window.hasFocus() && !window.textInputFocused() &&
-                             (window.keyDown('W') || window.keyDown('A') ||
-                              window.keyDown('S') || window.keyDown('D') ||
-                              window.keyDown('Q') || window.keyDown('E'));
-        if (camKeys && !camKeysWasDown) {
+        const bool camKeys =
+            in.active() && !in.textFocus() &&
+            (in.pressed('W') || in.pressed('A') || in.pressed('S') ||
+             in.pressed('D') || in.pressed('Q') || in.pressed('E'));
+        if (camKeys) {
             const sk::Vec3 p = camera.position();
             SK_INFO("camara (%.2f,%.2f,%.2f)", p.x, p.y, p.z);
         }
-        camKeysWasDown = camKeys;
 
         // Teclas 1-4: cambiar de herramienta (solo con la ventana
         // enfocada, en PLACE, sin escribir en un campo de texto y sin
         // un arrastre del gizmo en curso).
-        const bool toolKeysOk = window.hasFocus() && !window.textInputFocused() &&
+        const bool toolKeysOk = in.active() && !in.textFocus() &&
                                 workspace.visible() && place.visible() &&
                                 !gizmoDrag.active;
-        int toolKeyNow = 0;
         if (toolKeysOk) {
-            if (window.keyDown('1')) toolKeyNow = 1;
-            else if (window.keyDown('2')) toolKeyNow = 2;
-            else if (window.keyDown('3')) toolKeyNow = 3;
-            else if (window.keyDown('4')) toolKeyNow = 4;
+            if (in.pressed('1')) workspace.setTool(0);
+            else if (in.pressed('2')) workspace.setTool(1);
+            else if (in.pressed('3')) workspace.setTool(2);
+            else if (in.pressed('4')) workspace.setTool(3);
         }
-        if (toolKeyNow != 0 && toolKeyNow != toolKeyWasDown) {
-            workspace.setTool(toolKeyNow - 1);
-        }
-        toolKeyWasDown = toolKeyNow;
 
         // Suprimir / Retroceso: elimina la parte o todas las partes
         // seleccionadas (solo con la ventana enfocada, en PLACE, sin
         // escribir en un campo y sin un arrastre en curso).
-        const bool delKeyDown =
-            window.hasFocus() && !window.textInputFocused() &&
-            workspace.visible() && place.visible() && !gizmoDrag.active &&
-            !objDragActive &&
-            (window.keyDown(VK_DELETE) || window.keyDown(VK_BACK));
-        if (delKeyDown && !deleteKeyWasDown && !selection.empty()) {
+        const bool delOk =
+            in.active() && !in.textFocus() && workspace.visible() &&
+            place.visible() && !gizmoDrag.active && !objDragActive;
+        if (delOk && !selection.empty() &&
+            (in.pressed(VK_DELETE) || in.pressed(VK_BACK))) {
             // Borrar un padre se lleva a sus descendientes detras.
             performDelete(topLevelSelection());
         }
-        deleteKeyWasDown = delKeyDown;
 
         const float aspect = (window.framebufferHeight() > 0)
             ? static_cast<float>(window.framebufferWidth()) /
@@ -1287,14 +1255,13 @@ int main(int argc, char** argv) {
 
         // --- Portapapeles y rotacion (Ctrl+C/X/V/D/R/T) ---
         {
-            const bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-            const bool ok = window.hasFocus() && !window.textInputFocused() &&
+            const bool ctrlDown = in.ctrl();
+            const bool ok = in.active() && !in.textFocus() &&
                             workspace.visible() && place.visible() &&
                             !gizmoDrag.active && !objDragActive;
 
             // Copiar (Ctrl+C): los subarboles seleccionados al portapapeles.
-            const bool copyDown = ok && ctrlDown && window.keyDown('C');
-            if (edge(copyDown, copyKeyWasDown) && !selection.empty()) {
+            if (ok && ctrlDown && in.pressed('C') && !selection.empty()) {
                 clipboard.clear();
                 for (sk::InstanceId id : topLevelSelection()) {
                     clipboard.push_back(captureNodes(id));
@@ -1305,8 +1272,7 @@ int main(int argc, char** argv) {
             }
 
             // Cortar (Ctrl+X): copia y borra; el pegado posterior va al raton.
-            const bool cutDown = ok && ctrlDown && window.keyDown('X');
-            if (edge(cutDown, cutKeyWasDown) && !selection.empty()) {
+            if (ok && ctrlDown && in.pressed('X') && !selection.empty()) {
                 const std::vector<sk::InstanceId> tops = topLevelSelection();
                 if (!tops.empty()) {
                     clipboard.clear();
@@ -1329,8 +1295,7 @@ int main(int argc, char** argv) {
 
             // Pegar (Ctrl+V): si vino de copiar, encima del original; si
             // vino de cortar, bajo el puntero (mismo padre, desplazado).
-            const bool pasteDown = ok && ctrlDown && window.keyDown('V');
-            if (edge(pasteDown, pasteKeyWasDown) && !clipboard.empty()) {
+            if (ok && ctrlDown && in.pressed('V') && !clipboard.empty()) {
                 sk::Vec3 mouseOffset{};
                 if (clipboardFromCut && !clipboard.front().empty()) {
                     const float planeY = clipboard.front().front().position().y;
@@ -1391,8 +1356,7 @@ int main(int argc, char** argv) {
             }
 
             // Clonar en el sitio (Ctrl+D).
-            const bool dupDown = ok && ctrlDown && window.keyDown('D');
-            if (edge(dupDown, dupKeyWasDown) && !selection.empty()) {
+            if (ok && ctrlDown && in.pressed('D') && !selection.empty()) {
                 std::vector<sk::CommandPtr> parts;
                 std::vector<sk::InstanceId> newRoots;
                 for (sk::InstanceId id : selection) {
@@ -1417,8 +1381,7 @@ int main(int argc, char** argv) {
             }
 
             // Rotar 90 grados: Ctrl+R en Y, Ctrl+T en X.
-            const bool rotYDown = ok && ctrlDown && window.keyDown('R');
-            if (edge(rotYDown, rotYKeyWasDown) && !selection.empty()) {
+            if (ok && ctrlDown && in.pressed('R') && !selection.empty()) {
                 std::vector<sk::CommandPtr> parts;
                 for (sk::InstanceId id : selection) {
                     const sk::Instance* object = world.find(id);
@@ -1436,8 +1399,7 @@ int main(int argc, char** argv) {
                     SK_INFO("Rotado +90 en Y");
                 }
             }
-            const bool rotXDown = ok && ctrlDown && window.keyDown('T');
-            if (edge(rotXDown, rotXKeyWasDown) && !selection.empty()) {
+            if (ok && ctrlDown && in.pressed('T') && !selection.empty()) {
                 std::vector<sk::CommandPtr> parts;
                 for (sk::InstanceId id : selection) {
                     const sk::Instance* object = world.find(id);
@@ -1460,24 +1422,22 @@ int main(int argc, char** argv) {
         // --- Deshacer/rehacer (Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z),
         // renombrar con F2 y foco de camara en la seleccion (F) ---
         {
-            const bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-            const bool shiftDown = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-            const bool keysOk = window.hasFocus() && !window.textInputFocused() &&
+            const bool ctrlDown = in.ctrl();
+            const bool shiftDown = in.shift();
+            const bool keysOk = in.active() && !in.textFocus() &&
                                 workspace.visible() && place.visible() &&
                                 !gizmoDrag.active && !objDragActive;
             if (keysOk) {
                 // Deshacer y rehacer: solo PLACE y sin escribir en un
                 // campo (escribir Ctrl+Z en un EDIT no debe revertir).
-                const bool undoDown = ctrlDown && window.keyDown('Z');
-                if (edge(undoDown, undoKeyWasDown)) doUndo();
-                const bool redoDown = ctrlDown &&
-                                      (window.keyDown('Y') ||
-                                       (shiftDown && window.keyDown('Z')));
-                if (edge(redoDown, redoKeyWasDown)) doRedo();
+                if (ctrlDown && in.pressed('Z')) doUndo();
+                if (ctrlDown &&
+                    (in.pressed('Y') || (shiftDown && in.pressed('Z')))) {
+                    doRedo();
+                }
 
                 // F2: renombrar la parte activa con un dialogo de texto.
-                if (edge(window.keyDown(VK_F2), f2KeyWasDown) &&
-                    primary != sk::kInvalidId) {
+                if (in.pressed(VK_F2) && primary != sk::kInvalidId) {
                     const sk::Instance* object = world.find(primary);
                     if (object) {
                         const std::string newName = sk::ui::promptText(
@@ -1490,8 +1450,7 @@ int main(int argc, char** argv) {
                 }
 
                 // F: enfoca la camara en la seleccion (centro del grupo).
-                if (edge(window.keyDown('F'), fKeyWasDown) &&
-                    !selection.empty()) {
+                if (in.pressed('F') && !selection.empty()) {
                     sk::Vec3 minV{1e30f, 1e30f, 1e30f};
                     sk::Vec3 maxV{-1e30f, -1e30f, -1e30f};
                     bool any = false;
@@ -1521,7 +1480,7 @@ int main(int argc, char** argv) {
 
                 // F1: abre la Referencia de clases en la clase del objeto
                 // activo (o "Part" si no hay seleccion).
-                if (edge(window.keyDown(VK_F1), f1KeyWasDown)) {
+                if (in.pressed(VK_F1)) {
                     const sk::Instance* object = world.find(primary);
                     const std::string className =
                         object ? object->className() : std::string("Part");
@@ -1534,8 +1493,7 @@ int main(int argc, char** argv) {
                 }
 
                 // Ctrl+G: agrupa la seleccion bajo un Model nuevo.
-                const bool groupDown = ctrlDown && window.keyDown('G');
-                if (edge(groupDown, groupKeyWasDown) && !selection.empty()) {
+                if (ctrlDown && in.pressed('G') && !selection.empty()) {
                     std::vector<sk::InstanceId> members;
                     for (sk::InstanceId id : selection) {
                         if (!world.isProtected(id)) members.push_back(id);
@@ -1563,9 +1521,7 @@ int main(int argc, char** argv) {
 
                 // Ctrl+U: desagrupa los Model/Folder seleccionados (sus
                 // hijos suben al padre del grupo).
-                const bool ungroupDown = ctrlDown && window.keyDown('U');
-                if (edge(ungroupDown, ungroupKeyWasDown) &&
-                    !selection.empty()) {
+                if (ctrlDown && in.pressed('U') && !selection.empty()) {
                     std::vector<sk::CommandPtr> parts;
                     std::vector<sk::InstanceId> groups;
                     for (sk::InstanceId id : selection) {
@@ -1591,8 +1547,7 @@ int main(int argc, char** argv) {
                 }
 
                 // Ctrl+L: bloquea/desbloquea (Data.Locked) la seleccion.
-                const bool lockDown = ctrlDown && window.keyDown('L');
-                if (edge(lockDown, lockKeyWasDown) && !selection.empty()) {
+                if (ctrlDown && in.pressed('L') && !selection.empty()) {
                     std::vector<sk::CommandPtr> parts;
                     for (sk::InstanceId id : selection) {
                         const sk::Instance* o = world.find(id);
@@ -1614,9 +1569,7 @@ int main(int argc, char** argv) {
                 }
 
                 // Alt+A: ancla/desancla (Data.Anchored) la seleccion.
-                const bool altDown = (GetKeyState(VK_MENU) & 0x8000) != 0;
-                const bool anchorDown = altDown && window.keyDown('A');
-                if (edge(anchorDown, anchorKeyWasDown) && !selection.empty()) {
+                if (in.alt() && in.pressed('A') && !selection.empty()) {
                     std::vector<sk::CommandPtr> parts;
                     for (sk::InstanceId id : selection) {
                         const sk::Instance* o = world.find(id);
@@ -1762,7 +1715,7 @@ int main(int argc, char** argv) {
                 dragStart = *pressed;
                 // Cuerpo de una parte bajo el puntero: candidato a arrastre
                 // de objeto (se confirma al superar el umbral de arrastre).
-                pressCtrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+                pressCtrl = in.ctrl();
                 pressHit = sk::kInvalidId;
                 if (!pressCtrl) {
                     pressHit = sk::pickObject(
@@ -1795,8 +1748,8 @@ int main(int argc, char** argv) {
                 dragged.push_back(start.id);
                 startPose.push_back({start.id, start.pos, start.rot});
             }
-            const bool alignSurface = (GetKeyState(VK_MENU) & 0x8000) == 0;
-            const bool snapGrid = (GetKeyState(VK_SHIFT) & 0x8000) == 0;
+            const bool alignSurface = !in.alt();
+            const bool snapGrid = !in.shift();
             sk::DragResult result;
             sk::computeSurfaceDrag(world, ray0, ray1, dragged, leadIndex,
                                    grabOffset, startPose, alignSurface,
@@ -2021,7 +1974,7 @@ int main(int argc, char** argv) {
             const bool wasDrag = dragActive;
             dragPending = false;
             dragActive = false;
-            const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            const bool ctrl = in.ctrl();
             if (wasDrag) {
                 // Rectangulo de arrastre, clamado al viewport.
                 float x0 = std::fmin(dragStart.x, released->x);
@@ -2102,10 +2055,9 @@ int main(int argc, char** argv) {
         const bool dragging = gizmoDrag.active || objDragActive ||
                               dragActive || dragPending;
         const bool camKeysHeld =
-            window.hasFocus() && !window.textInputFocused() &&
-            (window.keyDown('W') || window.keyDown('A') ||
-             window.keyDown('S') || window.keyDown('D') ||
-             window.keyDown('Q') || window.keyDown('E'));
+            in.active() && !in.textFocus() &&
+            (in.down('W') || in.down('A') || in.down('S') || in.down('D') ||
+             in.down('Q') || in.down('E'));
         continuous = camKeysHeld || window.mouseRightDown() || dragging ||
                      play.active();
 

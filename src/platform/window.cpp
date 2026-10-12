@@ -98,6 +98,8 @@ void Window::destroy() {
 }
 
 bool Window::pumpEvents() {
+    // Nuevo frame de flancos: los onKeyDown posteriores marcan pressed.
+    input_.newFrame();
     MSG msg{};
     while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) {
         if (msg.message == WM_QUIT) {
@@ -116,24 +118,6 @@ bool Window::waitEvents(unsigned long timeoutMs) {
     // siguiente pumpEvents drena la cola.
     MsgWaitForMultipleObjects(0, nullptr, FALSE, timeoutMs, QS_ALLINPUT);
     return !shouldClose_;
-}
-
-bool Window::keyDown(int vk) const {
-    return (GetAsyncKeyState(vk) & 0x8000) != 0;
-}
-
-bool Window::hasFocus() const {
-    return GetForegroundWindow() == static_cast<HWND>(hwnd_);
-}
-
-bool Window::textInputFocused() const {
-    HWND focus = GetFocus();
-    if (!focus) return false;
-    char cls[32]{};
-    GetClassNameA(focus, cls, static_cast<int>(sizeof(cls)));
-    // La clase pre-registrada se llama "Edit" (la busqueda al crear la
-    // ventana acepta "EDIT", pero GetClassName devuelve el nombre real).
-    return lstrcmpiA(cls, "EDIT") == 0;
 }
 
 Vec2 Window::consumeMouseDelta() const {
@@ -188,6 +172,46 @@ long long __stdcall Window::wndProc(void* hwndPtr, unsigned int msg, unsigned lo
                              suggested->bottom - suggested->top,
                              SWP_NOZORDER | SWP_NOACTIVATE);
                 return 0;
+            }
+            case WM_KEYDOWN:
+            case WM_SYSKEYDOWN: {
+                // wParam es el VK; los SYSKEY cubren Alt (VK_MENU).
+                self->input_.onKeyDown(static_cast<int>(wParam));
+                // No consumir: DefWindowProc necesita WM_SYSKEYDOWN para
+                // el menu de sistema (Alt+Espacio) y el Alt+Tab.
+                break;
+            }
+            case WM_KEYUP:
+            case WM_SYSKEYUP: {
+                self->input_.onKeyUp(static_cast<int>(wParam));
+                break;
+            }
+            case WM_ACTIVATE: {
+                // Primer plano: el teclado deja de mover la camara cuando
+                // el usuario esta en otra aplicacion. Al desactivarse se
+                // olvidan las teclas (no llega su WM_KEYUP).
+                const bool active = LOWORD(wParam) != WA_INACTIVE;
+                self->input_.setActive(active);
+                if (!active) self->input_.clearKeys();
+                return 0;
+            }
+            case WM_SETFOCUS: {
+                // El foco vuelve a la ventana: ningun campo de texto activo.
+                self->input_.setTextFocus(false);
+                break;
+            }
+            case WM_KILLFOCUS: {
+                // Si el foco pasa a un EDIT (campo de texto), pausar camara
+                // y atajos. La comprobacion es por evento, no por frame.
+                const HWND next = reinterpret_cast<HWND>(wParam);
+                bool text = false;
+                if (next && IsChild(hwnd, next)) {
+                    char cls[32]{};
+                    GetClassNameA(next, cls, static_cast<int>(sizeof(cls)));
+                    text = lstrcmpiA(cls, "EDIT") == 0;
+                }
+                self->input_.setTextFocus(text);
+                break;
             }
             case WM_LBUTTONDOWN: {
                 const int x = GET_X_LPARAM(lParam);
