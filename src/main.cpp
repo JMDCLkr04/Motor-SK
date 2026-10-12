@@ -14,7 +14,12 @@
 
 #include "core/config.h"
 #include "core/log.h"
+#include "editor/clipboard_controller.h"
+#include "editor/editor_commands.h"
+#include "editor/gizmo_controller.h"
 #include "editor/layout.h"
+#include "editor/object_drag_controller.h"
+#include "editor/selection_controller.h"
 #include "math/math.h"
 #include "platform/window.h"
 #include "project/project.h"
@@ -75,6 +80,15 @@ bool parseStatsArg(int argc, char** argv) {
     return false;
 }
 
+// --debug: emite los registros de diagnostico del bucle (posiciones en
+// pantalla, puntas del gizmo, snap, ...).
+bool parseDebugArg(int argc, char** argv) {
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--debug") == 0) return true;
+    }
+    return false;
+}
+
 double nowSeconds() {
     static LARGE_INTEGER frequency = [] {
         LARGE_INTEGER f{};
@@ -104,6 +118,7 @@ int main(int argc, char** argv) {
     const std::string startupProject = parseProjectArg(argc, argv);
     const bool startupPlay = parsePlayArg(argc, argv);
     const bool statsEnabled = parseStatsArg(argc, argv);
+    sk::debugLogs() = parseDebugArg(argc, argv);
 
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--ui-demo") == 0) {
@@ -257,15 +272,6 @@ int main(int argc, char** argv) {
         return out;
     };
 
-    // Copia (valor) de un subarbol, raiz primero.
-    auto captureNodes = [&](sk::InstanceId id) {
-        std::vector<sk::Instance> out;
-        for (sk::InstanceId s : world.subtree(id)) {
-            if (const sk::Instance* o = world.find(s)) out.push_back(*o);
-        }
-        return out;
-    };
-
     // Ids seleccionados que no estan cubiertos por otro seleccionado
     // (evita borrar/copiar dos veces un subarbol). Excluye protegidos.
     auto topLevelSelection = [&]() {
@@ -315,18 +321,10 @@ int main(int argc, char** argv) {
 
     // Borra de golpe una lista de raices de subarbol (ya filtradas): un
     // solo comando compuesto con undo. La usan la tecla Supr y el propio
-    // Explorer.
+    // Explorer. La implementacion vive en EditorCommands.
     auto performDelete = [&](const std::vector<sk::InstanceId>& tops) {
-        if (tops.empty()) return;
-        int count = 0;
-        for (sk::InstanceId id : tops) {
-            count += static_cast<int>(world.subtree(id).size());
-        }
-        std::vector<sk::CommandPtr> parts;
-        for (sk::InstanceId id : tops) {
-            parts.push_back(sk::makeRemoveCommand(world, id));
-        }
-        undo.push(world, sk::makeCompoundCommand(std::move(parts)));
+        const int count = sk::editor::EditorCommands::remove(world, undo, tops);
+        if (count == 0) return;
         applySelection({}, sk::kInvalidId);
         place.rebuildTree(world);
         saveScene();
@@ -336,21 +334,20 @@ int main(int argc, char** argv) {
     // Renombrar una Part (campo Nombre de Properties o tecla F2): lo
     // aplica al World, al Explorer y al resto de paneles. Devuelve false
     // y no toca nada si el cambio no es valido (vacio, igual, duplicado,
-    // protegido o inexistente).
+    // protegido o inexistente). La validacion vive en EditorCommands.
     auto doRename = [&](sk::InstanceId id, const std::string& newName) -> bool {
-        const sk::Instance* object = world.find(id);
-        if (!object || object->isProtected()) return false;
-        const std::string oldName = object->name();
-        if (newName.empty() || oldName == newName) return false;
-        if (world.findChild(object->parentId(), newName) != sk::kInvalidId) {
+        const sk::Instance* before = world.find(id);
+        const std::string oldName = before ? before->name() : std::string();
+        std::string finalName;
+        if (!sk::editor::EditorCommands::rename(world, undo, id, newName,
+                                                finalName)) {
             return false;
         }
-        undo.push(world, sk::makeRenameCommand(world, id, newName));
-        const sk::Instance* renamed = world.find(id);
-        const std::string finalName = renamed ? renamed->name() : newName;
         place.renameTreeItem(id, finalName);
         saveScene();
-        if (renamed) place.showObject(*renamed); // campo al dia
+        if (const sk::Instance* renamed = world.find(id)) {
+            place.showObject(*renamed); // campo al dia
+        }
         code.refreshProperties(); // "Asociado a" en CODE
         SK_INFO("Part renombrado: %s -> %s", oldName.c_str(),
                 finalName.c_str());
@@ -993,53 +990,23 @@ int main(int argc, char** argv) {
     const double startTime = nowSeconds();
     double lastTime = startTime;
     int frame = 0;
-    // Portapapeles interno de subarboles (Ctrl+C/X). Los flancos de los
-    // atajos los lleva InputState (window.input()), no banderas locales.
-    std::vector<std::vector<sk::Instance>> clipboard;
-    bool clipboardFromCut = false;
 
-    // Arrastre de seleccion (marquee) en el viewport de PLACE.
-    bool dragPending = false;  // pressed dentro del viewport, sin mover
-    bool dragActive = false;   // supero el umbral: es un arrastre
-    sk::Vec2 dragStart{};
+    // Estado de interaccion en el viewport: seleccion (click / Ctrl+click /
+    // marquee), arrastre de objeto y arrastre del gizmo. Cada controlador
+    // encapsula su maquina de estados; el bucle solo orquesta.
+    sk::editor::ClipboardController clipboard;
+    sk::editor::SelectionController selectionCtrl;
+    sk::editor::ObjectDragController objDrag;
+    sk::editor::GizmoController gizmo;
 
-    // Gizmo de herramientas: arrastre activo + eje bajo el puntero.
-    sk::GizmoDrag gizmoDrag;
-
-    // Arrastre de objeto: mantener pulsado el cuerpo de una parte (sin
-    // tocar un asa del gizmo) y arrastrarla con el puntero. La caja del
-    // grupo se apoya en la cara del otro parte bajo el puntero (o en el
-    // suelo Y=0 si no hay nada): ver scene/snapping.h.
-    struct ObjDragStart {
-        sk::InstanceId id = sk::kInvalidId;
-        sk::Vec3 pos;
-        sk::Vec3 rot;
-    };
-    bool objDragActive = false;
-    std::vector<ObjDragStart> objDragStart;
-    // Punto de agarre menos centro del lead al empezar (mundo): fija la
-    // posicion del grupo respecto al puntero durante el arrastre.
-    sk::Vec3 grabOffset{};
-    sk::InstanceId pressHit = sk::kInvalidId; // objeto bajo el punto de presion
-    bool pressCtrl = false;
-    // Cara bajo el puntero durante el arrastre: se registra una sola vez
-    // por destino para que las pruebas vean donde se apoya la parte sin
-    // repetir el log en cada frame.
-    bool snapLogged = false;
-    sk::InstanceId snapSurface = sk::kInvalidId;
-    sk::Vec3 snapNormal{};
-    int hoverAxis = -1;
-    // Registro "gizmo eje X punta (x,y)": una sola vez por punta, para
-    // que las pruebas sepan donde pulsar sin repetir el log en cada frame.
+    // Contabilidad de los registros de diagnostico (puntas del gizmo y eje
+    // bajo el puntero): una sola vez por cambio, no en cada frame.
     int lastHoverTool = -1;
     int lastHoverAxis = -1;
     int lastHoverTx = -1;
     int lastHoverTy = -1;
     sk::InstanceId lastHoverPrimary = sk::kInvalidId;
     bool cursorForced = false;
-    // Puntas de los ejes logeadas al cambiar de herramienta o de
-    // seleccion (y tras cada arrastre): las pruebas leen de aqui donde
-    // poner el puntero sin tener que barrer el viewport.
     int lastTipsTool = -1;
     sk::InstanceId lastTipsPrimary = sk::kInvalidId;
     auto inViewport = [&](const sk::Vec2& p) {
@@ -1153,31 +1120,19 @@ int main(int argc, char** argv) {
         // proyectos. Solo con la ventana en primer plano (InputState
         // mantiene el estado por eventos).
         const bool escPressed = in.pressed(VK_ESCAPE) && in.active();
-        if (escPressed && gizmoDrag.active) {
-            sk::gizmoRevert(gizmoDrag, world);
-            gizmoDrag.active = false;
+        if (escPressed && gizmo.active()) {
+            gizmo.cancel(world);
             lastTipsTool = -1; // las puntas vuelven a su sitio
             SK_INFO("gizmo cancelado");
             applySelection(selection, primary);
-        } else if (escPressed && objDragActive) {
-            // Revierte el arrastre del objeto a sus poses de inicio
-            // (posicion y rotacion: el snap de superficie puede haber
-            // girado el grupo).
-            for (const ObjDragStart& start : objDragStart) {
-                if (sk::Instance* object = world.find(start.id)) {
-                    object->setPosition(start.pos);
-                    object->setRotation(start.rot);
-                    world.markChanged(start.id);
-                }
-            }
-            objDragActive = false;
-            objDragStart.clear();
-            dragPending = false;
+        } else if (escPressed && objDrag.active()) {
+            objDrag.cancel(world);
+            selectionCtrl.reset();
             SK_INFO("drag cancelado");
             applySelection(selection, primary);
-        } else if (escPressed && (dragPending || dragActive)) {
-            dragPending = false;
-            dragActive = false;
+        } else if (escPressed &&
+                   (selectionCtrl.pending() || selectionCtrl.active())) {
+            selectionCtrl.reset();
             SK_INFO("marquee cancelado");
         } else if (escPressed) {
             closeProject();
@@ -1212,7 +1167,7 @@ int main(int argc, char** argv) {
              in.pressed('D') || in.pressed('Q') || in.pressed('E'));
         if (camKeys) {
             const sk::Vec3 p = camera.position();
-            SK_INFO("camara (%.2f,%.2f,%.2f)", p.x, p.y, p.z);
+            SK_DEBUG("camara (%.2f,%.2f,%.2f)", p.x, p.y, p.z);
         }
 
         // Teclas 1-4: cambiar de herramienta (solo con la ventana
@@ -1220,7 +1175,7 @@ int main(int argc, char** argv) {
         // un arrastre del gizmo en curso).
         const bool toolKeysOk = in.active() && !in.textFocus() &&
                                 workspace.visible() && place.visible() &&
-                                !gizmoDrag.active;
+                                !gizmo.active();
         if (toolKeysOk) {
             if (in.pressed('1')) workspace.setTool(0);
             else if (in.pressed('2')) workspace.setTool(1);
@@ -1233,7 +1188,7 @@ int main(int argc, char** argv) {
         // escribir en un campo y sin un arrastre en curso).
         const bool delOk =
             in.active() && !in.textFocus() && workspace.visible() &&
-            place.visible() && !gizmoDrag.active && !objDragActive;
+            place.visible() && !gizmo.active() && !objDrag.active();
         if (delOk && !selection.empty() &&
             (in.pressed(VK_DELETE) || in.pressed(VK_BACK))) {
             // Borrar un padre se lleva a sus descendientes detras.
@@ -1258,38 +1213,23 @@ int main(int argc, char** argv) {
             const bool ctrlDown = in.ctrl();
             const bool ok = in.active() && !in.textFocus() &&
                             workspace.visible() && place.visible() &&
-                            !gizmoDrag.active && !objDragActive;
+                            !gizmo.active() && !objDrag.active();
 
             // Copiar (Ctrl+C): los subarboles seleccionados al portapapeles.
             if (ok && ctrlDown && in.pressed('C') && !selection.empty()) {
-                clipboard.clear();
-                for (sk::InstanceId id : topLevelSelection()) {
-                    clipboard.push_back(captureNodes(id));
-                }
-                clipboardFromCut = false;
-                SK_INFO("Copiados %d objeto(s)",
-                        static_cast<int>(clipboard.size()));
+                clipboard.copy(world, topLevelSelection());
+                SK_INFO("Copiados %d objeto(s)", clipboard.count());
             }
 
             // Cortar (Ctrl+X): copia y borra; el pegado posterior va al raton.
             if (ok && ctrlDown && in.pressed('X') && !selection.empty()) {
                 const std::vector<sk::InstanceId> tops = topLevelSelection();
                 if (!tops.empty()) {
-                    clipboard.clear();
-                    for (sk::InstanceId id : tops) {
-                        clipboard.push_back(captureNodes(id));
-                    }
-                    clipboardFromCut = true;
-                    std::vector<sk::CommandPtr> parts;
-                    for (sk::InstanceId id : tops) {
-                        parts.push_back(sk::makeRemoveCommand(world, id));
-                    }
-                    undo.push(world, sk::makeCompoundCommand(std::move(parts)));
+                    clipboard.cut(world, undo, tops);
                     applySelection({}, sk::kInvalidId);
                     place.rebuildTree(world);
                     saveScene();
-                    SK_INFO("Cortados %d objeto(s)",
-                            static_cast<int>(clipboard.size()));
+                    SK_INFO("Cortados %d objeto(s)", clipboard.count());
                 }
             }
 
@@ -1297,8 +1237,8 @@ int main(int argc, char** argv) {
             // vino de cortar, bajo el puntero (mismo padre, desplazado).
             if (ok && ctrlDown && in.pressed('V') && !clipboard.empty()) {
                 sk::Vec3 mouseOffset{};
-                if (clipboardFromCut && !clipboard.front().empty()) {
-                    const float planeY = clipboard.front().front().position().y;
+                if (clipboard.fromCut() && !clipboard.first().empty()) {
+                    const float planeY = clipboard.first().front().position().y;
                     const sk::Ray ray = sk::rayFromCamera(
                         camera, aspect, 60.0f, window.mousePos(), vpW, vpH);
                     if (std::fabs(ray.dir.y) > 1e-6f) {
@@ -1306,45 +1246,22 @@ int main(int argc, char** argv) {
                         if (t > 0.0f) {
                             const sk::Vec3 hit = ray.origin + ray.dir * t;
                             mouseOffset = {
-                                hit.x - clipboard.front().front().position().x,
+                                hit.x - clipboard.first().front().position().x,
                                 0.0f,
-                                hit.z - clipboard.front().front().position().z};
+                                hit.z - clipboard.first().front().position().z};
                         }
                     }
                 }
-                // Ids padre de las raices del portapapeles: si todas
-                // comparten padre y sigue existiendo, se pega ahi.
-                sk::InstanceId sharedParent = sk::kInvalidId;
-                bool sameParent = true;
-                for (size_t i = 0; i < clipboard.size(); ++i) {
-                    if (clipboard[i].empty()) continue;
-                    const sk::InstanceId p = clipboard[i].front().parentId();
-                    if (i == 0 || sharedParent == sk::kInvalidId) {
-                        sharedParent = p;
-                    } else if (p != sharedParent) {
-                        sameParent = false;
-                    }
-                }
+                // Si todas las raices comparten padre y sigue existiendo,
+                // se pega ahi; si no, bajo el Workspace.
+                const sk::InstanceId shared = clipboard.sharedParent(world);
                 const sk::InstanceId target =
-                    (sameParent && world.exists(sharedParent))
-                        ? sharedParent
-                        : defaultParent();
-                const sk::Vec3 off = clipboardFromCut
+                    shared != sk::kInvalidId ? shared : defaultParent();
+                const sk::Vec3 off = clipboard.fromCut()
                                          ? mouseOffset
                                          : sk::Vec3{0.0f, 1.0f, 0.0f};
-                std::vector<sk::Instance> nodes;
-                std::vector<sk::InstanceId> newIds;
-                for (const std::vector<sk::Instance>& subtree : clipboard) {
-                    for (const sk::Instance& n : subtree) {
-                        nodes.push_back(n);
-                        newIds.push_back(world.allocateId());
-                    }
-                }
-                if (!nodes.empty()) {
-                    std::vector<sk::InstanceId> roots;
-                    undo.push(world, sk::makeInsertSubtreeCommand(
-                                         world, nodes, newIds, target, off, "",
-                                         &roots));
+                std::vector<sk::InstanceId> roots;
+                if (clipboard.paste(world, undo, target, off, roots)) {
                     place.rebuildTree(world);
                     if (!roots.empty()) {
                         applySelection(roots, roots.back());
@@ -1357,19 +1274,10 @@ int main(int argc, char** argv) {
 
             // Clonar en el sitio (Ctrl+D).
             if (ok && ctrlDown && in.pressed('D') && !selection.empty()) {
-                std::vector<sk::CommandPtr> parts;
                 std::vector<sk::InstanceId> newRoots;
-                for (sk::InstanceId id : selection) {
-                    const sk::Instance* object = world.find(id);
-                    if (!object) continue;
-                    sk::InstanceId root = sk::kInvalidId;
-                    parts.push_back(sk::makeCloneCommand(
-                        world, id, object->parentId(), sk::Vec3{}, &root));
-                    if (root != sk::kInvalidId) newRoots.push_back(root);
-                }
-                if (!parts.empty()) {
-                    undo.push(world,
-                              sk::makeCompoundCommand(std::move(parts)));
+                if (sk::editor::EditorCommands::duplicate(world, undo,
+                                                          selection,
+                                                          newRoots)) {
                     place.rebuildTree(world);
                     applySelection(newRoots,
                                    newRoots.empty() ? sk::kInvalidId
@@ -1426,7 +1334,7 @@ int main(int argc, char** argv) {
             const bool shiftDown = in.shift();
             const bool keysOk = in.active() && !in.textFocus() &&
                                 workspace.visible() && place.visible() &&
-                                !gizmoDrag.active && !objDragActive;
+                                !gizmo.active() && !objDrag.active();
             if (keysOk) {
                 // Deshacer y rehacer: solo PLACE y sin escribir en un
                 // campo (escribir Ctrl+Z en un EDIT no debe revertir).
@@ -1451,26 +1359,11 @@ int main(int argc, char** argv) {
 
                 // F: enfoca la camara en la seleccion (centro del grupo).
                 if (in.pressed('F') && !selection.empty()) {
-                    sk::Vec3 minV{1e30f, 1e30f, 1e30f};
-                    sk::Vec3 maxV{-1e30f, -1e30f, -1e30f};
-                    bool any = false;
-                    for (sk::InstanceId id : selection) {
-                        const sk::Instance* object = world.find(id);
-                        if (!object) continue;
-                        any = true;
-                        const sk::Vec3 pos = object->position();
-                        const sk::Vec3 scale = object->scale();
-                        for (int a = 0; a < 3; ++a) {
-                            const float half = std::fabs((&scale.x)[a]) * 0.5f;
-                            const float lo = (&pos.x)[a] - half;
-                            const float hi = (&pos.x)[a] + half;
-                            (&minV.x)[a] = std::fmin((&minV.x)[a], lo);
-                            (&maxV.x)[a] = std::fmax((&maxV.x)[a], hi);
-                        }
-                    }
-                    if (any) {
-                        const sk::Vec3 center = (minV + maxV) * 0.5f;
-                        camera.focus(center, sk::length(maxV - minV) * 0.5f);
+                    sk::Vec3 center{};
+                    float radius = 0.0f;
+                    if (sk::editor::EditorCommands::bounds(world, selection,
+                                                           center, radius)) {
+                        camera.focus(center, radius);
                         SK_INFO("camera foco: %d objeto(s) centro "
                                 "(%.2f,%.2f,%.2f)",
                                 static_cast<int>(selection.size()), center.x,
@@ -1506,37 +1399,26 @@ int main(int argc, char** argv) {
                         }
                         if (parent == sk::kInvalidId) parent = defaultParent();
                         sk::InstanceId groupId = sk::kInvalidId;
-                        undo.push(world, sk::makeGroupCommand(
-                                             world, parent, members,
-                                             &groupId));
-                        saveScene();
-                        place.rebuildTree(world);
-                        applySelection({groupId}, groupId);
-                        logProjection = true;
-                        SK_INFO("Grupo %s con %d objeto(s)",
-                                worldName(groupId).c_str(),
-                                static_cast<int>(members.size()));
+                        if (sk::editor::EditorCommands::group(
+                                world, undo, parent, members, groupId)) {
+                            saveScene();
+                            place.rebuildTree(world);
+                            applySelection({groupId}, groupId);
+                            logProjection = true;
+                            SK_INFO("Grupo %s con %d objeto(s)",
+                                    worldName(groupId).c_str(),
+                                    static_cast<int>(members.size()));
+                        }
                     }
                 }
 
                 // Ctrl+U: desagrupa los Model/Folder seleccionados (sus
                 // hijos suben al padre del grupo).
                 if (ctrlDown && in.pressed('U') && !selection.empty()) {
-                    std::vector<sk::CommandPtr> parts;
                     std::vector<sk::InstanceId> groups;
-                    for (sk::InstanceId id : selection) {
-                        const sk::Instance* object = world.find(id);
-                        if (!object || world.isProtected(id)) continue;
-                        if (object->className() != "Model" &&
-                            object->className() != "Folder") {
-                            continue;
-                        }
-                        groups.push_back(id);
-                        parts.push_back(sk::makeUngroupCommand(world, id));
-                    }
-                    if (!parts.empty()) {
-                        undo.push(world,
-                                  sk::makeCompoundCommand(std::move(parts)));
+                    if (sk::editor::EditorCommands::ungroup(world, undo,
+                                                            selection,
+                                                            groups)) {
                         saveScene();
                         place.rebuildTree(world);
                         applySelection({}, sk::kInvalidId);
@@ -1548,18 +1430,8 @@ int main(int argc, char** argv) {
 
                 // Ctrl+L: bloquea/desbloquea (Data.Locked) la seleccion.
                 if (ctrlDown && in.pressed('L') && !selection.empty()) {
-                    std::vector<sk::CommandPtr> parts;
-                    for (sk::InstanceId id : selection) {
-                        const sk::Instance* o = world.find(id);
-                        if (!o || world.isProtected(id)) continue;
-                        sk::PropertyValue pv;
-                        pv.b = !o->propBool("Locked", false);
-                        parts.push_back(
-                            sk::makePropertyCommand(world, id, "Locked", pv));
-                    }
-                    if (!parts.empty()) {
-                        undo.push(world,
-                                  sk::makeCompoundCommand(std::move(parts)));
+                    if (sk::editor::EditorCommands::toggleBool(
+                            world, undo, selection, "Locked", false)) {
                         saveScene();
                         if (const sk::Instance* o = world.find(selection.front()))
                             place.showObject(*o);
@@ -1570,18 +1442,8 @@ int main(int argc, char** argv) {
 
                 // Alt+A: ancla/desancla (Data.Anchored) la seleccion.
                 if (in.alt() && in.pressed('A') && !selection.empty()) {
-                    std::vector<sk::CommandPtr> parts;
-                    for (sk::InstanceId id : selection) {
-                        const sk::Instance* o = world.find(id);
-                        if (!o || world.isProtected(id)) continue;
-                        sk::PropertyValue pv;
-                        pv.b = !o->propBool("Anchored", false);
-                        parts.push_back(
-                            sk::makePropertyCommand(world, id, "Anchored", pv));
-                    }
-                    if (!parts.empty()) {
-                        undo.push(world,
-                                  sk::makeCompoundCommand(std::move(parts)));
+                    if (sk::editor::EditorCommands::toggleBool(
+                            world, undo, selection, "Anchored", false)) {
                         saveScene();
                         if (const sk::Instance* o = world.find(selection.front()))
                             place.showObject(*o);
@@ -1607,30 +1469,28 @@ int main(int argc, char** argv) {
                 std::fmax(std::fabs(gscale.y), std::fabs(gscale.z)));
         }
         // Durante el arrastre el tamano visual se congela (L del arrastre).
-        if (gizmoDrag.active) gizmoScaleMax = 2.0f * gizmoDrag.L - 2.0f;
+        if (gizmo.active()) gizmoScaleMax = 2.0f * gizmo.drag().L - 2.0f;
         const sk::Vec3 gizmoViewDir =
             sk::normalize(camera.position() - gizmoOrigin);
 
         // Eje bajo el puntero (solo con el raton en el viewport y sin
-        // arrastre en curso). El hit test ignora los colores, asi que las
-        // lineas de sondeo se construyen sin resaltar.
-        if (gizmoReady && !gizmoDrag.active && !objDragActive &&
-            inViewport(window.mousePos())) {
-            const std::vector<sk::GizmoLine> probe =
-                sk::buildGizmo(tool, gizmoOrigin, gizmoScaleMax, gizmoViewDir, -1);
-            hoverAxis = sk::hitTestGizmo(probe, window.mousePos(), viewProj, vpW, vpH);
-        } else {
-            hoverAxis = -1;
-        }
-        // El resaltado del gizmo cambia al pasar de un eje a otro: repinta.
-        if (hoverAxis != lastDrawnHover) {
+        // arrastre en curso): lo lleva el GizmoController (hit test sin
+        // resaltar: el probe ignora los colores).
+        const bool canHoverGizmo =
+            gizmoReady && !gizmo.active() && !objDrag.active() &&
+            inViewport(window.mousePos());
+        if (gizmo.updateHover(canHoverGizmo, world, tool, gizmoOrigin,
+                              gizmoScaleMax, gizmoViewDir, viewProj, vpW, vpH,
+                              window.mousePos())) {
+            // El resaltado del gizmo cambio de eje: repinta.
             needsRedraw = true;
-            lastDrawnHover = hoverAxis;
+            lastDrawnHover = gizmo.hoverAxis();
         }
+        const int hoverAxis = gizmo.hoverAxis();
 
         // Puntas de los ejes al cambiar de herramienta o de objeto
         // primario (o tras un arrastre, que deja la marca sin marcar).
-        if (gizmoReady && !gizmoDrag.active && !objDragActive &&
+        if (gizmoReady && !gizmo.active() && !objDrag.active() &&
             (tool != lastTipsTool || primary != lastTipsPrimary)) {
             sk::Vec3 ndc;
             int px[3] = {-1, -1, -1};
@@ -1643,8 +1503,8 @@ int main(int argc, char** argv) {
                     py[axis] = static_cast<int>((ndc.y * 0.5f + 0.5f) * vpH);
                 }
             }
-            SK_INFO("gizmo puntas X(%d,%d) Y(%d,%d) Z(%d,%d)", px[0], py[0],
-                    px[1], py[1], px[2], py[2]);
+            SK_DEBUG("gizmo puntas X(%d,%d) Y(%d,%d) Z(%d,%d)", px[0], py[0],
+                     px[1], py[1], px[2], py[2]);
             if (tool == 1 || tool == 2) {
                 // Mangos negativos (3..5), en un registro aparte para no
                 // mezclarlos con el recuento de "gizmo puntas".
@@ -1658,8 +1518,8 @@ int main(int argc, char** argv) {
                         ny[axis] = static_cast<int>((ndc.y * 0.5f + 0.5f) * vpH);
                     }
                 }
-                SK_INFO("puntas neg X(%d,%d) Y(%d,%d) Z(%d,%d)", nx[0], ny[0],
-                        nx[1], ny[1], nx[2], ny[2]);
+                SK_DEBUG("puntas neg X(%d,%d) Y(%d,%d) Z(%d,%d)", nx[0], ny[0],
+                         nx[1], ny[1], nx[2], ny[2]);
             }
             lastTipsTool = tool;
             lastTipsPrimary = primary;
@@ -1669,37 +1529,26 @@ int main(int argc, char** argv) {
         if (pressed && inViewport(*pressed)) {
             bool startedGizmo = false;
             // El eje se recalcula con el punto exacto del press: el hover
-            // (hoverAxis) se deriva de mousePos y puede haberse perdido si
-            // un movimiento real del raton llego entre el hover y el click.
+            // se deriva de mousePos y puede haberse perdido si un
+            // movimiento real del raton llego entre el hover y el click.
             int pressAxis = -1;
-            if (gizmoReady && !gizmoDrag.active) {
+            if (gizmoReady && !gizmo.active()) {
                 const std::vector<sk::GizmoLine> probe = sk::buildGizmo(
                     tool, gizmoOrigin, gizmoScaleMax, gizmoViewDir, -1);
                 pressAxis = sk::hitTestGizmo(probe, *pressed, viewProj, vpW, vpH);
             }
             if (pressAxis >= 0) {
-                // Part bloqueada (Locked): no se arrastra con el raton,
-                // aunque sus campos Transform sigan siendo editables.
-                bool anyLocked = false;
-                for (sk::InstanceId id : selection) {
-                    const sk::Instance* object = world.find(id);
-                    if (object && object->propBool("Locked", false)) {
-                        anyLocked = true;
-                        break;
-                    }
-                }
-                if (!anyLocked) {
-                    const sk::Ray ray = sk::rayFromCamera(
-                        camera, aspect, 60.0f, *pressed, vpW, vpH);
-                    startedGizmo = sk::gizmoBegin(
-                        gizmoDrag, tool, pressAxis, world, selection,
-                        gizmoOrigin, gizmoScaleMax, gizmoViewDir, ray);
-                }
+                // Part bloqueada (Locked): no se arrastra con el raton
+                // (el propio controlador lo comprueba).
+                const sk::Ray ray = sk::rayFromCamera(
+                    camera, aspect, 60.0f, *pressed, vpW, vpH);
+                startedGizmo = gizmo.begin(world, tool, pressAxis, selection,
+                                           gizmoOrigin, gizmoScaleMax,
+                                           gizmoViewDir, ray);
                 if (startedGizmo) {
                     // El arrastre del gizmo sustituye al marquee. El undo
                     // se registra al soltar (delta transform).
-                    dragPending = false;
-                    dragActive = false;
+                    selectionCtrl.reset();
                     if (pressAxis < 3) {
                         SK_INFO("gizmo %s: arrastre eje %c", kToolNames[tool],
                                 "XYZ"[pressAxis]);
@@ -1709,19 +1558,17 @@ int main(int argc, char** argv) {
                     }
                 }
             }
-            if (!startedGizmo && !gizmoDrag.active) {
-                dragPending = true;
-                dragActive = false;
-                dragStart = *pressed;
-                // Cuerpo de una parte bajo el puntero: candidato a arrastre
-                // de objeto (se confirma al superar el umbral de arrastre).
-                pressCtrl = in.ctrl();
-                pressHit = sk::kInvalidId;
-                if (!pressCtrl) {
-                    pressHit = sk::pickObject(
+            if (!startedGizmo && !gizmo.active()) {
+                // Cuerpo de una parte bajo el puntero: candidato a
+                // arrastre de objeto (se confirma al superar el umbral).
+                const bool ctrl = in.ctrl();
+                sk::InstanceId pickHit = sk::kInvalidId;
+                if (!ctrl) {
+                    pickHit = sk::pickObject(
                         world, sk::rayFromCamera(camera, aspect, 60.0f,
                                                  *pressed, vpW, vpH));
                 }
+                selectionCtrl.beginPress(*pressed, ctrl, pickHit);
             }
         }
 
@@ -1731,59 +1578,15 @@ int main(int argc, char** argv) {
         // alineada a esa cara y la posicion en su plano a la rejilla;
         // sin nada debajo el rayo cae al plano del suelo Y=0. Alt
         // conserva la orientacion y Shift desactiva la rejilla.
-        if (objDragActive) {
+        if (objDrag.active()) {
             const sk::Ray ray0 = sk::rayFromCamera(
-                camera, aspect, 60.0f, dragStart, vpW, vpH);
+                camera, aspect, 60.0f, selectionCtrl.start(), vpW, vpH);
             const sk::Ray ray1 = sk::rayFromCamera(
                 camera, aspect, 60.0f, window.mousePos(), vpW, vpH);
-            std::vector<sk::InstanceId> dragged;
-            std::vector<sk::DragPose> startPose;
-            dragged.reserve(objDragStart.size());
-            startPose.reserve(objDragStart.size());
-            int leadIndex = -1;
-            for (const ObjDragStart& start : objDragStart) {
-                if (start.id == pressHit) {
-                    leadIndex = static_cast<int>(dragged.size());
-                }
-                dragged.push_back(start.id);
-                startPose.push_back({start.id, start.pos, start.rot});
-            }
-            const bool alignSurface = !in.alt();
-            const bool snapGrid = !in.shift();
-            sk::DragResult result;
-            sk::computeSurfaceDrag(world, ray0, ray1, dragged, leadIndex,
-                                   grabOffset, startPose, alignSurface,
-                                   snapGrid ? workspace.moveStep() : 0.0f,
-                                   result);
-            for (const sk::DragPose& pose : result.poses) {
-                if (sk::Instance* object = world.find(pose.id)) {
-                    object->setPosition(pose.position);
-                    object->setRotation(pose.rotation);
-                    world.markChanged(pose.id);
-                }
-            }
+            // Alt conserva la orientacion y Shift desactiva la rejilla.
+            objDrag.update(world, ray0, ray1, !in.alt(),
+                           in.shift() ? 0.0f : workspace.moveStep());
             ++contentVersion; // la escena cambio: rehacer models/contornos
-            // Registro de la cara de destino: una sola vez por cara (las
-            // pruebas leen donde se apoya la parte sin spam de logs).
-            if (!snapLogged || result.surfaceId != snapSurface ||
-                sk::length(result.surfaceNormal - snapNormal) > 1e-3f) {
-                if (result.onSurface) {
-                    SK_INFO("snap %s: cara de %s normal (%.2f,%.2f,%.2f)",
-                            worldName(pressHit).c_str(),
-                            worldName(result.surfaceId).c_str(),
-                            result.surfaceNormal.x, result.surfaceNormal.y,
-                            result.surfaceNormal.z);
-                } else if (result.groundHit) {
-                    SK_INFO("snap %s: suelo Y=0", worldName(pressHit).c_str());
-                } else {
-                    SK_INFO("snap %s: cielo (x/z del plano de camara, "
-                                          "apoyo en el suelo)",
-                            worldName(pressHit).c_str());
-                }
-                snapLogged = true;
-                snapSurface = result.surfaceId;
-                snapNormal = result.surfaceNormal;
-            }
             if (selection.size() == 1) {
                 if (const sk::Instance* object = world.find(selection.front())) {
                     place.showObject(*object, false); // Transform al dia sin relayout
@@ -1792,11 +1595,11 @@ int main(int argc, char** argv) {
         }
 
         // Arrastre del gizmo: el delta se aplica a toda la seleccion.
-        if (gizmoDrag.active) {
+        if (gizmo.active()) {
             const sk::Ray ray = sk::rayFromCamera(
                 camera, aspect, 60.0f, window.mousePos(), vpW, vpH);
-            if (sk::gizmoUpdate(gizmoDrag, ray, world, workspace.moveStep(),
-                            static_cast<float>(workspace.rotateStep())) &&
+            if (gizmo.update(world, ray, workspace.moveStep(),
+                             static_cast<float>(workspace.rotateStep())) &&
                 selection.size() == 1 &&
                 primaryObj) {
                 place.showObject(*primaryObj, false); // Transform al dia (sin relayout)
@@ -1806,7 +1609,7 @@ int main(int argc, char** argv) {
 
         // Registro al apuntar a un eje (una sola vez por punta: las
         // pruebas hacen hover, leen la punta y arrastran).
-        if (hoverAxis >= 0 && gizmoReady && !gizmoDrag.active) {
+        if (hoverAxis >= 0 && gizmoReady && !gizmo.active()) {
             const sk::Vec3 tip = sk::gizmoHandlePoint(
                 tool, hoverAxis, gizmoOrigin, gizmoScaleMax);
             int tx = -1;
@@ -1820,11 +1623,11 @@ int main(int argc, char** argv) {
                 primary != lastHoverPrimary || tx != lastHoverTx ||
                 ty != lastHoverTy) {
                 if (hoverAxis < 3) {
-                    SK_INFO("gizmo eje %c punta (%d,%d)", "XYZ"[hoverAxis], tx,
-                            ty);
+                    SK_DEBUG("gizmo eje %c punta (%d,%d)", "XYZ"[hoverAxis], tx,
+                             ty);
                 } else {
-                    SK_INFO("gizmo eje -%c punta (%d,%d)", "XYZ"[hoverAxis - 3],
-                            tx, ty);
+                    SK_DEBUG("gizmo eje -%c punta (%d,%d)",
+                             "XYZ"[hoverAxis - 3], tx, ty);
                 }
                 lastHoverTool = tool;
                 lastHoverAxis = hoverAxis;
@@ -1838,7 +1641,7 @@ int main(int argc, char** argv) {
 
         // Cursor de cruz de mover sobre el gizmo o mientras se arrastra.
         const bool wantMoveCursor =
-            gizmoDrag.active || objDragActive || hoverAxis >= 0;
+            gizmo.active() || objDrag.active() || hoverAxis >= 0;
         if (wantMoveCursor) {
             SetCursor(LoadCursorA(nullptr, IDC_SIZEALL));
             cursorForced = true;
@@ -1847,19 +1650,23 @@ int main(int argc, char** argv) {
             cursorForced = false;
         }
 
-        if (dragPending && !dragActive && !objDragActive) {
+        // Umbral de arrastre: si el puntero se aleja del punto de presion,
+        // decide entre arrastre de objeto (cuerpo de una parte) o marquee.
+        if (selectionCtrl.pending() && !selectionCtrl.active() &&
+            !objDrag.active()) {
             const int thX = GetSystemMetrics(SM_CXDRAG);
             const int thY = GetSystemMetrics(SM_CYDRAG);
             const sk::Vec2 pos = window.mousePos();
-            if (std::abs(pos.x - dragStart.x) > thX ||
-                std::abs(pos.y - dragStart.y) > thY) {
+            const sk::Vec2 ds = selectionCtrl.start();
+            if (std::abs(pos.x - ds.x) > thX || std::abs(pos.y - ds.y) > thY) {
+                const sk::InstanceId pressHit = selectionCtrl.pressHit();
                 if (pressHit != sk::kInvalidId) {
                     const sk::Instance* pressedObj = world.find(pressHit);
                     if (pressedObj && pressedObj->propBool("Locked", false)) {
                         // Part Locked: el cuerpo no inicia arrastre.
-                        dragPending = false;
-                        SK_INFO("drag %s: bloqueada (Locked)",
-                                worldName(pressHit).c_str());
+                        selectionCtrl.reset();
+                        SK_DEBUG("drag %s: bloqueada (Locked)",
+                                 worldName(pressHit).c_str());
                     } else {
                         // Es el cuerpo de una parte: arrastre de objeto en
                         // vez de marquee (si no estaba seleccionado, pasa
@@ -1868,137 +1675,49 @@ int main(int argc, char** argv) {
                                       pressHit) == selection.end()) {
                             applySelection({pressHit}, pressHit);
                         }
-                        objDragActive = true;
-                        objDragStart.clear();
-                        for (sk::InstanceId id : selection) {
-                            const sk::Instance* object = world.find(id);
-                            // Una parte Locked no viaja con el arrastre.
-                            if (!object ||
-                                object->propBool("Locked", false)) {
-                                continue;
-                            }
-                            objDragStart.push_back(
-                                {id, object->position(), object->rotation()});
-                        }
-                        // Punto de agarre (donde se pulso sobre el cuerpo)
-                        // menos el centro del lead: fija la posicion del
-                        // grupo respecto al puntero durante todo el
-                        // arrastre.
                         const sk::Ray ray0 = sk::rayFromCamera(
-                            camera, aspect, 60.0f, dragStart, vpW, vpH);
-                        const sk::Instance* hitObj = world.find(pressHit);
-                        grabOffset = {};
-                        if (hitObj) {
-                            sk::Vec3 grabPoint{};
-                            sk::Vec3 grabNormal{};
-                            if (sk::rayObjectFace(*hitObj, ray0, grabPoint,
-                                                  grabNormal)) {
-                                grabOffset = grabPoint - hitObj->position();
-                            }
-                        }
-                        snapLogged = false; // el primer frame registra la cara
-                        snapSurface = sk::kInvalidId;
-                        snapNormal = {};
-                        dragPending = false;
-                        SK_INFO("drag %s: arrastre", worldName(pressHit).c_str());
+                            camera, aspect, 60.0f, ds, vpW, vpH);
+                        objDrag.begin(world, selection, pressHit, ray0);
+                        selectionCtrl.reset();
+                        SK_DEBUG("drag %s: arrastre",
+                                 worldName(pressHit).c_str());
                     }
                 } else {
-                    dragActive = true;
-                    SK_INFO("marquee (%d,%d)-(%d,%d)",
-                            static_cast<int>(dragStart.x),
-                            static_cast<int>(dragStart.y),
-                            static_cast<int>(pos.x), static_cast<int>(pos.y));
+                    selectionCtrl.beginMarquee();
+                    SK_DEBUG("marquee (%d,%d)-(%d,%d)",
+                             static_cast<int>(ds.x), static_cast<int>(ds.y),
+                             static_cast<int>(pos.x), static_cast<int>(pos.y));
                 }
             }
         }
-        if (released && objDragActive) {
+        if (released && objDrag.active()) {
             // Fin del arrastre: registrar el cambio (undo) y guardar.
-            std::vector<sk::CommandPtr> parts;
-            for (const ObjDragStart& start : objDragStart) {
-                const sk::Instance* object = world.find(start.id);
-                if (!object) continue;
-                SK_INFO("drag %s: pos (%.2f,%.2f,%.2f)->(%.2f,%.2f,%.2f) "
-                        "rot (%.2f,%.2f,%.2f)->(%.2f,%.2f,%.2f)",
-                        worldName(start.id).c_str(), start.pos.x, start.pos.y,
-                        start.pos.z, object->position().x,
-                        object->position().y, object->position().z,
-                        start.rot.x, start.rot.y, start.rot.z,
-                        object->rotation().x, object->rotation().y,
-                        object->rotation().z);
-                parts.push_back(sk::makeTransformCommandExplicit(
-                    start.id, start.pos, start.rot, object->scale(),
-                    object->position(), object->rotation(),
-                    object->scale()));
-            }
-            objDragActive = false;
-            objDragStart.clear();
-            pressHit = sk::kInvalidId;
-            dragPending = false;
+            objDrag.commit(world, undo);
             lastTipsTool = -1; // las puntas del gizmo siguen al objeto
-            if (!parts.empty()) {
-                undo.push(world, sk::makeCompoundCommand(std::move(parts)));
-            }
             saveScene();
             applySelection(selection, primary);
-        } else if (released && gizmoDrag.active) {
+        } else if (released && gizmo.active()) {
             // Fin del arrastre: registrar el cambio (undo), guardar y
             // refrescar.
-            std::vector<sk::CommandPtr> parts;
-            for (const sk::GizmoSnapshot& snap : gizmoDrag.snapshots) {
-                const sk::Instance* object = world.find(snap.id);
-                if (!object) continue;
-                SK_INFO("gizmo %s: %s pos (%.2f,%.2f,%.2f)->(%.2f,%.2f,%.2f) "
-                        "rot (%.2f,%.2f,%.2f)->(%.2f,%.2f,%.2f) "
-                        "esc (%.2f,%.2f,%.2f)->(%.2f,%.2f,%.2f)",
-                        kToolNames[gizmoDrag.tool], worldName(snap.id).c_str(),
-                        snap.position.x, snap.position.y, snap.position.z,
-                        object->position().x, object->position().y,
-                        object->position().z, snap.rotation.x, snap.rotation.y,
-                        snap.rotation.z, object->rotation().x,
-                        object->rotation().y, object->rotation().z,
-                        snap.scale.x, snap.scale.y, snap.scale.z,
-                        object->scale().x, object->scale().y,
-                        object->scale().z);
-                parts.push_back(sk::makeTransformCommandExplicit(
-                    snap.id, snap.position, snap.rotation, snap.scale,
-                    object->position(), object->rotation(), object->scale()));
-            }
-            gizmoDrag.active = false;
+            gizmo.commit(world, undo);
             lastTipsTool = -1; // las puntas han podido cambiar
-            if (!parts.empty()) {
-                undo.push(world, sk::makeCompoundCommand(std::move(parts)));
-            }
             saveScene();
             applySelection(selection, primary);
-        } else if (released && (dragPending || dragActive)) {
-            const bool wasDrag = dragActive;
-            dragPending = false;
-            dragActive = false;
+        } else if (released &&
+                   (selectionCtrl.pending() || selectionCtrl.active())) {
+            const bool wasDrag = selectionCtrl.active();
+            const sk::Vec2 ds = selectionCtrl.start();
+            selectionCtrl.reset();
             const bool ctrl = in.ctrl();
             if (wasDrag) {
                 // Rectangulo de arrastre, clamado al viewport.
-                float x0 = std::fmin(dragStart.x, released->x);
-                float y0 = std::fmin(dragStart.y, released->y);
-                float x1 = std::fmax(dragStart.x, released->x);
-                float y1 = std::fmax(dragStart.y, released->y);
-                const sk::editor::Layout vpLayout =
-                    sk::editor::Layout::compute(vpW, vpH);
-                x0 = std::fmax(x0, static_cast<float>(vpLayout.viewport.x));
-                y0 = std::fmax(y0, static_cast<float>(vpLayout.topBar.bottom()));
-                x1 = std::fmin(x1, static_cast<float>(vpLayout.rightPanel.x));
-                y1 = std::fmin(y1, static_cast<float>(vpH));
-                std::vector<sk::InstanceId> hits;
-                if (x0 < x1 && y0 < y1) {
-                    hits = sk::selectInRect(world, viewProj,
-                                            sk::Vec2{x0, y0}, sk::Vec2{x1, y1},
-                                            vpW, vpH);
-                }
-                SK_INFO("marquee -> %d objetos", static_cast<int>(hits.size()));
-                sk::InstanceId newPrimary = primary;
-                if (std::find(hits.begin(), hits.end(), primary) == hits.end()) {
-                    newPrimary = hits.empty() ? sk::kInvalidId : hits.front();
-                }
-                applySelection(std::move(hits), newPrimary);
+                std::vector<sk::InstanceId> hits =
+                    sk::editor::SelectionController::resolveMarquee(
+                        world, viewProj, ds, *released, vpW, vpH, selection,
+                        primary);
+                SK_INFO("marquee -> %d objetos",
+                        static_cast<int>(hits.size()));
+                applySelection(std::move(hits), primary);
             } else {
                 // Click simple: el objeto mas cercano bajo el puntero.
                 const sk::InstanceId hit = sk::pickObject(
@@ -2008,28 +1727,10 @@ int main(int argc, char** argv) {
                         static_cast<int>(released->y),
                         hit == sk::kInvalidId ? "(nada)"
                                               : worldName(hit).c_str());
-                std::vector<sk::InstanceId> ids = selection;
-                sk::InstanceId newPrimary = primary;
-                if (hit == sk::kInvalidId) {
-                    ids.clear();       // click en vacio: deselecciona
-                    newPrimary = sk::kInvalidId;
-                } else if (ctrl) {
-                    const auto it = std::find(ids.begin(), ids.end(), hit);
-                    if (it != ids.end()) {
-                        ids.erase(it); // quitar de la seleccion
-                        if (newPrimary == hit) {
-                            newPrimary = ids.empty() ? sk::kInvalidId
-                                                     : ids.front();
-                        }
-                    } else {
-                        ids.push_back(hit); // anadir (Ctrl)
-                        newPrimary = hit;
-                    }
-                } else {
-                    ids = {hit};
-                    newPrimary = hit;
-                }
-                applySelection(std::move(ids), newPrimary);
+                std::vector<sk::InstanceId> ids =
+                    sk::editor::SelectionController::resolveClick(
+                        selection, hit, ctrl, primary);
+                applySelection(std::move(ids), primary);
             }
         }
 
@@ -2042,8 +1743,8 @@ int main(int argc, char** argv) {
                 if (sk::transformPoint(viewProj, object->position(), ndc)) {
                     const float px = (ndc.x * 0.5f + 0.5f) * vpW;
                     const float py = (ndc.y * 0.5f + 0.5f) * vpH;
-                    SK_INFO("%s pantalla (%d,%d)", object->name().c_str(),
-                            static_cast<int>(px), static_cast<int>(py));
+                    SK_DEBUG("%s pantalla (%d,%d)", object->name().c_str(),
+                             static_cast<int>(px), static_cast<int>(py));
                 }
             }
         }
@@ -2052,8 +1753,8 @@ int main(int argc, char** argv) {
         // Solo se llama a drawFrame si algo cambio o hay interaccion
         // sostenida (camara, arrastres, ventana Play). En reposo no se
         // dibuja nada y el bucle duerme sin consumir CPU.
-        const bool dragging = gizmoDrag.active || objDragActive ||
-                              dragActive || dragPending;
+        const bool dragging = gizmo.active() || objDrag.active() ||
+                              selectionCtrl.active() || selectionCtrl.pending();
         const bool camKeysHeld =
             in.active() && !in.textFocus() &&
             (in.down('W') || in.down('A') || in.down('S') || in.down('D') ||
@@ -2093,18 +1794,14 @@ int main(int argc, char** argv) {
             // igual que la seleccion al soltar: clamado al viewport para
             // que el rectangulo visible coincida con lo que se selecciona.
             sk::ScreenRect marquee;
-            if (dragActive && inViewport(dragStart)) {
-                const sk::Vec2 pos = window.mousePos();
-                float x0 = std::fmin(dragStart.x, pos.x);
-                float y0 = std::fmin(dragStart.y, pos.y);
-                float x1 = std::fmax(dragStart.x, pos.x);
-                float y1 = std::fmax(dragStart.y, pos.y);
-                const sk::editor::Layout vpLayout =
-                    sk::editor::Layout::compute(vpW, vpH);
-                x0 = std::fmax(x0, static_cast<float>(vpLayout.viewport.x));
-                y0 = std::fmax(y0, static_cast<float>(vpLayout.topBar.bottom()));
-                x1 = std::fmin(x1, static_cast<float>(vpLayout.rightPanel.x));
-                y1 = std::fmin(y1, static_cast<float>(vpH));
+            if (selectionCtrl.active() && inViewport(selectionCtrl.start())) {
+                float x0 = 0.0f;
+                float y0 = 0.0f;
+                float x1 = 0.0f;
+                float y1 = 0.0f;
+                sk::editor::SelectionController::marqueeRect(
+                    selectionCtrl.start(), window.mousePos(), vpW, vpH, x0, y0,
+                    x1, y1);
                 marquee.valid = true;
                 marquee.x0 = x0;
                 marquee.y0 = y0;
@@ -2117,13 +1814,9 @@ int main(int argc, char** argv) {
             std::vector<sk::LineVertex> gizmoLines;
             if (gizmoReady) {
                 // Resalta el mango bajo el puntero o el mango agarrado.
-                int paintAxis = hoverAxis;
-                if (gizmoDrag.active) {
-                    paintAxis = gizmoDrag.axis +
-                                (gizmoDrag.axisSign < 0 ? 3 : 0);
-                }
+                const int paintAxis = gizmo.paintAxis();
                 const std::vector<sk::GizmoLine> geo = sk::buildGizmo(
-                    gizmoDrag.active ? gizmoDrag.tool : tool, gizmoOrigin,
+                    gizmo.active() ? gizmo.drag().tool : tool, gizmoOrigin,
                     gizmoScaleMax, gizmoViewDir, paintAxis);
                 gizmoLines.reserve(geo.size() * 2);
                 for (const sk::GizmoLine& line : geo) {

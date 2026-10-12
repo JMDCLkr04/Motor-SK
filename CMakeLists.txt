@@ -38,6 +38,8 @@ add_library(motorsk_model STATIC
     src/scene/collection_service.cpp
     src/scene/commands.cpp
     src/scene/world.cpp
+    src/editor/editor_commands.cpp
+    src/editor/clipboard_controller.cpp
     src/editor/layout.cpp
     src/ui/kit/tree_model.cpp
 )
@@ -59,6 +61,9 @@ add_executable(${PROJECT_NAME}
     src/scene/picking.cpp
     src/scene/gizmo.cpp
     src/scene/snapping.cpp
+    src/editor/gizmo_controller.cpp
+    src/editor/object_drag_controller.cpp
+    src/editor/selection_controller.cpp
     src/ui/code_view.cpp
     src/render/renderer.cpp
     src/render/meshes.cpp

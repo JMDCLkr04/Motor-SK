@@ -21,6 +21,14 @@ inline void setLogSink(std::function<void(LogLevel, const std::string&)> sink) {
     logSink() = std::move(sink);
 }
 
+// Los registros de diagnostico del bucle (posiciones en pantalla, puntas
+// del gizmo, snap, ...) se emiten solo con --debug: en uso normal no
+// ensucian la salida ni el panel Output.
+inline bool& debugLogs() {
+    static bool enabled = false;
+    return enabled;
+}
+
 inline void log(LogLevel level, const char* fmt, ...) {
     const char* tag = "INFO ";
     if (level == LogLevel::Warn) tag = "WARN ";
@@ -43,3 +51,9 @@ inline void log(LogLevel level, const char* fmt, ...) {
 #define SK_INFO(...)  ::sk::log(::sk::LogLevel::Info,  __VA_ARGS__)
 #define SK_WARN(...)  ::sk::log(::sk::LogLevel::Warn,  __VA_ARGS__)
 #define SK_ERROR(...) ::sk::log(::sk::LogLevel::Error, __VA_ARGS__)
+
+// Registro de diagnostico: solo se emite con --debug (ver debugLogs()).
+#define SK_DEBUG(...)                                                    \
+    do {                                                                 \
+        if (::sk::debugLogs()) ::sk::log(::sk::LogLevel::Info, __VA_ARGS__); \
+    } while (0)
