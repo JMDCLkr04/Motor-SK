@@ -8,11 +8,13 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 #include "scene/commands.h"
 #include "scene/world.h"
+#include "ui/kit/tree_model.h"
 
 namespace {
 
@@ -515,6 +517,225 @@ void testNameFuzz() {
     std::printf("  %zu nodos tras 4000 operaciones\n", w.aliveCount());
 }
 
+// --- Arbol del Explorer (TreeModel) --------------------------------------
+using sk::ui::DropDecision;
+using sk::ui::DropZone;
+using sk::ui::IconId;
+using sk::ui::NodeId;
+using sk::ui::TreeModel;
+using sk::ui::TreeNode;
+
+// Comprueba que cada fila aparece despues de su padre (preorden) y que el
+// nivel del hijo es el del padre + 1.
+bool isPreorder(const std::vector<TreeNode>& rows) {
+    std::unordered_map<NodeId, int> pos;
+    for (int i = 0; i < (int)rows.size(); ++i) pos[rows[i].id] = i;
+    for (int i = 0; i < (int)rows.size(); ++i) {
+        const NodeId p = rows[i].parentId;
+        if (p == 0 || p == sk::ui::kTreeRootId) continue; // nivel superior
+        auto it = pos.find(p);
+        if (it == pos.end()) return false;
+        if (it->second >= i) return false;
+        if (rows[i].level != rows[it->second].level + 1) return false;
+    }
+    return true;
+}
+
+void testTreeFlatten5Levels() {
+    World w;
+    w.ensureStructure();
+    const InstanceId ws = workspaceOf(w);
+    const InstanceId a = w.create("Part", ws);
+    const InstanceId b = w.create("Part", a);
+    const InstanceId c = w.create("Part", b);
+    const InstanceId d = w.create("Part", c);
+    const InstanceId e = w.create("Part", d);
+
+    TreeModel m(&w);
+    m.expandAll();
+    const std::vector<TreeNode>& rows = m.rows();
+    CHECK(isPreorder(rows));
+    const int iws = m.indexOf(ws);
+    const int ie = m.indexOf(e);
+    CHECK(iws >= 0);
+    CHECK(ie >= 0);
+    CHECK(iws < ie);
+    CHECK(rows[ie].level == rows[iws].level + 5);
+    CHECK(rows[ie].id == e);
+    std::printf("  5 niveles: fila Workspace=%d, fila E=%d (nivel %d)\n", iws,
+                ie, rows[ie].level);
+}
+
+void testTreeExpandCollapse() {
+    World w;
+    w.ensureStructure();
+    const InstanceId ws = workspaceOf(w);
+    const InstanceId a = w.create("Part", ws);
+    const InstanceId b = w.create("Part", a);
+
+    TreeModel m(&w);
+    m.collapseAll();
+    // Sin expandir: solo los 3 nodos de nivel superior (Dimensions,
+    // Scripts y Assets).
+    CHECK(m.rows().size() == 3);
+    CHECK(m.indexOf(a) < 0);
+    CHECK(m.indexOf(b) < 0);
+
+    m.expandTo(b);
+    CHECK(m.isExpanded(a));
+    CHECK(m.indexOf(a) >= 0);
+    CHECK(m.indexOf(b) >= 0);
+
+    m.setExpanded(a, false);
+    CHECK(m.indexOf(a) >= 0);
+    CHECK(m.indexOf(b) < 0);
+
+    m.setExpanded(a, true);
+    CHECK(m.indexOf(b) >= 0);
+    CHECK(isPreorder(m.rows()));
+}
+
+void testTreeRemovalDepth5() {
+    World w;
+    w.ensureStructure();
+    const InstanceId ws = workspaceOf(w);
+    InstanceId parent = ws;
+    for (int i = 0; i < 5; ++i) parent = w.create("Part", parent);
+    const InstanceId deep = parent;
+    const InstanceId leaf = w.create("Part", deep);
+
+    TreeModel m(&w);
+    m.expandAll();
+    CHECK(m.indexOf(deep) >= 0);
+    CHECK(m.indexOf(leaf) >= 0);
+    const size_t before = m.rows().size();
+
+    CHECK(w.remove(deep));
+    m.onRemoved(deep);
+    CHECK(m.indexOf(deep) < 0);
+    CHECK(m.indexOf(leaf) < 0); // los descendientes tambien desaparecen
+    CHECK(m.rows().size() < before);
+    CHECK(isPreorder(m.rows()));
+    std::printf("  borrado a profundidad 5: %zu -> %zu filas\n", before,
+                m.rows().size());
+}
+
+void testTree200Levels() {
+    World w;
+    w.ensureStructure();
+    const InstanceId ws = workspaceOf(w);
+    InstanceId parent = ws;
+    InstanceId deepest = ws;
+    for (int i = 0; i < 200; ++i) {
+        parent = w.create("Part", parent);
+        deepest = parent;
+    }
+    TreeModel m(&w);
+    m.expandAll();
+    const std::vector<TreeNode>& rows = m.rows();
+    CHECK(isPreorder(rows));
+    const int iws = m.indexOf(ws);
+    const int ideep = m.indexOf(deepest);
+    CHECK(iws >= 0);
+    CHECK(ideep >= 0);
+    CHECK(rows[ideep].level == rows[iws].level + 200);
+    std::printf("  200 niveles: %zu filas, nivel mas profundo=%d\n",
+                rows.size(), rows[ideep].level);
+}
+
+void testTreeReparent() {
+    World w;
+    w.ensureStructure();
+    const InstanceId ws = workspaceOf(w);
+    const InstanceId a = w.create("Part", ws);
+    const InstanceId b = w.create("Part", ws);
+
+    TreeModel m(&w);
+    m.expandAll();
+    CHECK(m.parentOf(a) == ws);
+    const DropDecision d = m.dropTarget(a, b, DropZone::Inside);
+    CHECK(d.valid);
+    CHECK(d.newParent == b);
+
+    CHECK(w.reparent(a, b));
+    m.onReparented(a, ws, b);
+    CHECK(m.parentOf(a) == b);
+    CHECK(isPreorder(m.rows()));
+}
+
+void testTreeInvalidTargets() {
+    World w;
+    w.ensureStructure();
+    const InstanceId ws = workspaceOf(w);
+    const InstanceId a = w.create("Part", ws);
+    const InstanceId b = w.create("Part", a);
+
+    TreeModel m(&w);
+    m.expandAll();
+
+    const DropDecision self = m.dropTarget(a, a, DropZone::Inside);
+    CHECK(!self.valid);
+    CHECK(std::string(self.reason) == "el mismo");
+
+    // b ya esta dentro de a: mover a dentro de b formaria un ciclo.
+    const DropDecision cyc = m.dropTarget(a, b, DropZone::Inside);
+    CHECK(!cyc.valid);
+    CHECK(std::string(cyc.reason) == "ciclo");
+
+    // Workspace es protegido: no se puede arrastrar.
+    const DropDecision prot = m.dropTarget(ws, b, DropZone::Inside);
+    CHECK(!prot.valid);
+    CHECK(std::string(prot.reason) == "protegido");
+
+    const DropDecision missing = m.dropTarget(999999, b, DropZone::Inside);
+    CHECK(!missing.valid);
+    CHECK(std::string(missing.reason) == "inexistente");
+}
+
+void testTreePreorderUnorderedEvents() {
+    World w;
+    w.ensureStructure();
+    const InstanceId ws = workspaceOf(w);
+    const InstanceId a = w.create("Part", ws);
+    const InstanceId b = w.create("Part", a);
+    const InstanceId c = w.create("Part", b);
+
+    TreeModel m(&w);
+    // Eventos en desorden (y alguno redundante): el modelo lee del World,
+    // asi que el orden no debe alterar el preorden.
+    m.onAdded(c, b);
+    m.onAdded(a, ws);
+    m.onAdded(b, a);
+    m.onReparented(c, b, b);
+    m.onRenamed(a);
+    m.expandAll();
+    CHECK(isPreorder(m.rows()));
+    CHECK(m.indexOf(a) >= 0);
+    CHECK(m.indexOf(b) >= 0);
+    CHECK(m.indexOf(c) >= 0);
+}
+
+void testTreeIcons() {
+    using sk::ui::iconForClass;
+    const IconId part = iconForClass("Part");
+    const IconId model = iconForClass("Model");
+    const IconId folder = iconForClass("Folder");
+    const IconId workspace = iconForClass("Workspace");
+    const IconId camera = iconForClass("Camera");
+    const IconId script = iconForClass("Script");
+    CHECK(part == IconId::Part);
+    CHECK(model == IconId::Model);
+    CHECK(folder == IconId::Folder);
+    CHECK(workspace == IconId::Workspace);
+    CHECK(camera == IconId::Camera);
+    CHECK(script == IconId::Script);
+    std::printf(
+        "  iconos: Part=%d Model=%d Folder=%d Workspace=%d Camera=%d "
+        "Script=%d\n",
+        (int)part, (int)model, (int)folder, (int)workspace, (int)camera,
+        (int)script);
+}
+
 } // namespace
 
 int main() {
@@ -529,6 +750,14 @@ int main() {
     testSaveLoadRoundTrip();
     testNameIndexPerformance();
     testNameFuzz();
+    testTreeFlatten5Levels();
+    testTreeExpandCollapse();
+    testTreeRemovalDepth5();
+    testTree200Levels();
+    testTreeReparent();
+    testTreeInvalidTargets();
+    testTreePreorderUnorderedEvents();
+    testTreeIcons();
 
     std::printf("\n%d comprobaciones, %d fallos\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

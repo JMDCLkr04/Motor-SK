@@ -20,6 +20,7 @@ public:
     void setOnScroll(std::function<void(int)> cb) { onScroll_ = std::move(cb); }
 
     bool visible() const { return visible_; }
+    bool dragging() const { return dragging_; }
     void setVisible(bool v);
     RECT rect() const;
     void setRect(const RECT& r);

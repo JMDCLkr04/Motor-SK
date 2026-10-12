@@ -312,6 +312,26 @@ int main(int argc, char** argv) {
         }
     };
 
+    // Borra de golpe una lista de raices de subarbol (ya filtradas): un
+    // solo comando compuesto con undo. La usan la tecla Supr y el propio
+    // Explorer.
+    auto performDelete = [&](const std::vector<sk::InstanceId>& tops) {
+        if (tops.empty()) return;
+        int count = 0;
+        for (sk::InstanceId id : tops) {
+            count += static_cast<int>(world.subtree(id).size());
+        }
+        std::vector<sk::CommandPtr> parts;
+        for (sk::InstanceId id : tops) {
+            parts.push_back(sk::makeRemoveCommand(world, id));
+        }
+        undo.push(world, sk::makeCompoundCommand(std::move(parts)));
+        applySelection({}, sk::kInvalidId);
+        place.rebuildTree(world);
+        saveScene();
+        SK_INFO("Eliminados %d objetos", count);
+    };
+
     // Renombrar una Part (campo Nombre de Properties o tecla F2): lo
     // aplica al World, al Explorer y al resto de paneles. Devuelve false
     // y no toca nada si el cambio no es valido (vacio, igual, duplicado,
@@ -874,6 +894,27 @@ int main(int argc, char** argv) {
                 worldName(created).c_str(), worldName(parentId).c_str());
     });
 
+    // Tecla Supr en el Explorer: borra los nodos indicados (filtrando
+    // protegidos y descendientes de otros de la propia lista).
+    place.setOnDeleteRequested([&](const std::vector<sk::InstanceId>& ids) {
+        std::vector<sk::InstanceId> tops;
+        for (sk::InstanceId id : ids) {
+            const sk::Instance* o = world.find(id);
+            if (!o || o->isProtected()) continue;
+            bool covered = false;
+            for (sk::InstanceId a : ids) {
+                if (a == id) continue;
+                const std::vector<sk::InstanceId> sub = world.subtree(a);
+                if (std::find(sub.begin(), sub.end(), id) != sub.end()) {
+                    covered = true;
+                    break;
+                }
+            }
+            if (!covered) tops.push_back(id);
+        }
+        performDelete(tops);
+    });
+
     // CODE: el panel Properties consulta el objeto asociado a un script.
     code.setOnQueryAssoc([&](const std::string& rel) -> std::string {
         for (sk::InstanceId id : allInstances()) {
@@ -1034,31 +1075,34 @@ int main(int argc, char** argv) {
                p.y <= static_cast<float>(window.framebufferHeight());
     };
 
-    // Re-agrupar desde el Explorer: suelta X sobre Y y Y queda dentro de X
-    // (o el grupo Dimensions = la dimension raiz). Valida que el padre
-    // exista, que no sea el propio hijo y que no se formen ciclos.
-    place.setOnReparent([&](sk::InstanceId child, sk::InstanceId parent) {
+    // Re-agrupar desde el Explorer: soltar X sobre Y (Inside) deja a X
+    // dentro de Y; soltar entre filas (Before/After) reordena entre los
+    // hermanos con index. Valida que el padre exista, que no sea el propio
+    // hijo y que no se formen ciclos.
+    place.setOnReparent([&](sk::InstanceId child, sk::InstanceId parent,
+                            int index) {
         if (!view3d || child == sk::kInvalidId) return;
         const sk::Instance* object = world.find(child);
-        if (!object) return;
-        if (parent == sk::kInvalidId) {
-            const std::vector<sk::InstanceId> dims = world.dimensions();
-            if (dims.empty()) return;
-            parent = dims.front();
-        }
+        if (!object || object->isProtected()) return;
+        if (parent == sk::kInvalidId) return;  // sin padre valido: no-op
         if (child == parent) return;
         if (!world.exists(parent)) return;
-        if (object->parentId() == parent) return;
+        const bool sameParent = object->parentId() == parent;
+        if (sameParent && index < 0) return;  // nada que reordenar
         // Ciclo: el nuevo padre no puede ser descendiente del hijo.
-        for (sk::InstanceId s : world.subtree(child)) {
-            if (s == parent) return;
+        if (!sameParent) {
+            for (sk::InstanceId s : world.subtree(child)) {
+                if (s == parent) return;
+            }
         }
-        undo.push(world, sk::makeReparentCommand(world, child, parent));
+        undo.push(world,
+                  sk::makeReparentCommand(world, child, parent, index));
         saveScene();
         place.rebuildTree(world);
         applySelection({child}, child);
         logProjection = true;
-        SK_INFO("Explorer: %s cuelga de %s", worldName(child).c_str(),
+        SK_INFO("Explorer: %s %s %s", worldName(child).c_str(),
+                sameParent ? "reordenado bajo" : "cuelga de",
                 worldName(parent).c_str());
     });
 
@@ -1225,22 +1269,7 @@ int main(int argc, char** argv) {
             (window.keyDown(VK_DELETE) || window.keyDown(VK_BACK));
         if (delKeyDown && !deleteKeyWasDown && !selection.empty()) {
             // Borrar un padre se lleva a sus descendientes detras.
-            const std::vector<sk::InstanceId> tops = topLevelSelection();
-            int count = 0;
-            for (sk::InstanceId id : tops) {
-                count += static_cast<int>(world.subtree(id).size());
-            }
-            if (!tops.empty()) {
-                std::vector<sk::CommandPtr> parts;
-                for (sk::InstanceId id : tops) {
-                    parts.push_back(sk::makeRemoveCommand(world, id));
-                }
-                undo.push(world, sk::makeCompoundCommand(std::move(parts)));
-                applySelection({}, sk::kInvalidId);
-                place.rebuildTree(world);
-                saveScene();
-                SK_INFO("Eliminados %d objetos", count);
-            }
+            performDelete(topLevelSelection());
         }
         deleteKeyWasDown = delKeyDown;
 

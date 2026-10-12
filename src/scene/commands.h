@@ -56,6 +56,9 @@ CommandPtr makeCreateCommand(const World& world, const std::string& className,
 CommandPtr makeRemoveCommand(const World& world, InstanceId id);
 CommandPtr makeReparentCommand(const World& world, InstanceId id,
                                InstanceId newParent);
+// Variante con posicion entre hermanos (reordenar); index < 0 = al final.
+CommandPtr makeReparentCommand(const World& world, InstanceId id,
+                               InstanceId newParent, int index);
 CommandPtr makeRenameCommand(const World& world, InstanceId id,
                              const std::string& newName);
 CommandPtr makePropertyCommand(const World& world, InstanceId id,

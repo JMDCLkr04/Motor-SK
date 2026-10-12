@@ -13,7 +13,7 @@ capa depende solo de las de abajo:
 ```
 src/main.cpp
    ├── ui/        (paneles Win32 + kit de widgets propio en ui/kit/)
-   │     ├── place_view  (Properties | Explorer | Assets)
+   │     ├── place_view  (Properties | Output | Explorer)
    │     ├── docs_view   (Referencia de clases, lee ClassRegistry)
    │     ├── code_view   (organizador de scripts)
    │     ├── projects_panel, play_window ...
@@ -71,7 +71,7 @@ el resto es UI/render y se prueba con smoke tests (ver "Cómo probar").
 ```
 World.create(className, parent)
    └─ emitAdded(id, parent)
-        ├─ ui: Explorer inserta/expande el nodo y lo selecciona
+        ├─ ui: TreeModel anota el alta y TreeWidget repinta solo lo afectado
         ├─ ui: Properties refresca el formulario
         └─ World marca renderDirty_ (invalidateRender) y pide repintado
    └─ renderParts() devuelve la lista plana de Part (cadena cacheada)
@@ -108,11 +108,21 @@ UI:
   `theme.h` (tokens de color/medida), `icon_atlas` + `icons.h`
   (pipeline `tools/make_icons.py` -> PNG/atlas + nombre por icono),
   `scroll_bar`, `tab_strip`, `disclosure` (plegable), `place_popup`
-  (menú contextual del `+`), `tree_widget`, `list_widget`, `demo_window`
-  (muestra el kit, se abre con `--ui-demo`).
+  (menú contextual del `+`), `tree_model`, `tree_widget`, `list_widget`,
+  `demo_window` (muestra el kit, se abre con `--ui-demo`).
 
-Estado: `TreeWidget`/`ListWidget` compilan como scaffolds; el Explorer y la
-lista de la Referencia siguen usando los controles nativos hasta el portado.
+Estado: el Explorer ya usa `tree_model` + `tree_widget` (filas de 22 px
+virtualizadas, sangría real, icono por clase, `+` en la fila bajo el ratón,
+selección/teclado/renombrado en línea y arrastrar+soltar con fila fantasma y
+tres zonas). La lista de la Referencia de clases (`docs_view`) usa
+`list_widget` (cabeceras redondeadas, sin blanco nativo). El resto de
+controles nativos se portarán de forma incremental.
+
+`tree_model.{h,cpp}` es **lógica pura** (sin `windows.h`, entra en
+`motorsk_model`): lee el `World` por id (no copia texto), aplana en preorden
+con pila explícita (aguanta 200+ niveles), guarda el conjunto de expandidos
+por id y resuelve `dropTarget(origen, destino, zona)` (ciclo, protegido, él
+mismo, inexistente). Se prueba en `tests/test_model.cpp`.
 
 ## Cómo probar
 
@@ -127,7 +137,11 @@ build\Release\motorsk_tests.exe
 Incluyen perfiles de rendimiento del índice de nombres (5000 altas en el
 mismo padre < 150 ms, clonar/insertar 2000 nodos < 100 ms) y un **fuzz** de
 4000 operaciones aleatorias (create/reparent/remove/rename) que comprueba los
-invariantes (padre<->hijos consistente, nombres únicos entre hermanos). Los
+invariantes (padre<->hijos consistente, nombres únicos entre hermanos). Hay
+además pruebas del `TreeModel`: aplanado en preorden a 5 y a 200 niveles,
+expandir/plegar, borrado a profundidad 5, reubicación, destinos inválidos de
+arrastre (ciclo/protegido/él mismo/inexistente) y preorden estable aunque los
+eventos del `World` lleguen desordenados. Los
 límites de tiempo solo se exigen en compilación optimizada (`Release` /O2);
 bajo `_DEBUG` o ASan la instrumentación los hace no representativos y se mide
 sin afirmar.

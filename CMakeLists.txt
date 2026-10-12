@@ -38,6 +38,7 @@ add_library(motorsk_model STATIC
     src/scene/collection_service.cpp
     src/scene/commands.cpp
     src/scene/world.cpp
+    src/ui/kit/tree_model.cpp
 )
 target_include_directories(motorsk_model PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 set_target_properties(motorsk_model PROPERTIES

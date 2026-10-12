@@ -29,21 +29,6 @@ constexpr int kHeaderHeight = 36;
 // es el "Parent" que muestra Properties para cualquier parte.
 constexpr const char* kRootName = "dimension01";
 
-// Grupos sinteticos de nivel superior del Explorer (no son objetos de la
-// escena): agrupan las dimensiones, los scripts del proyecto y la
-// biblioteca de recursos.
-constexpr const char* kDimensionsGroup = "Dimensions";
-constexpr const char* kScriptsGroup = "Scripts";
-constexpr const char* kAssetsGroup = "Assets";
-
-// Carpetas base de la biblioteca de Assets (siempre visibles, aunque
-// esten vacias), en el orden del diseno.
-const char* const kAssetFolders[] = {"Models",   "Meshes",   "Images",
-                                     "Textures", "Audio",    "Animations",
-                                     "ModuleScripts"};
-constexpr int kAssetFolderCount =
-    static_cast<int>(sizeof(kAssetFolders) / sizeof(kAssetFolders[0]));
-
 // Ids dentro del panel Properties (100.. = etiquetas, 200.. = valores,
 // 300.. = resumenes "x, y, z" de cada fila del Transform).
 constexpr int kIdStatus = 100;
@@ -173,98 +158,6 @@ void paintTabs(HDC hdc, const RECT& rc, const char* const* labels, int count,
     LineTo(hdc, rc.right, kHeaderHeight);
     SelectObject(hdc, oldPen);
     DeleteObject(pen);
-}
-
-HTREEITEM addTreeRoot(HWND tree, const char* text) {
-    char label[128]{};
-    lstrcpynA(label, text, 128);
-    TVINSERTSTRUCTA ins{};
-    ins.hParent = TVI_ROOT;
-    ins.hInsertAfter = TVI_LAST;
-    ins.item.mask = TVIF_TEXT;
-    ins.item.pszText = label;
-    return TreeView_InsertItem(tree, &ins);
-}
-
-// Inserta un nodo hijo (bajo parent) con el texto dado. sceneNode es el
-// InstanceId del objeto (>= 1, lleva el boton "+"); 0 para los grupos
-// sinteticos y las entradas de disco.
-HTREEITEM addTreeChild(HWND tree, HTREEITEM parent, const std::string& text,
-                       LPARAM sceneNode = 0) {
-    char label[260]{};
-    lstrcpynA(label, text.c_str(), 260);
-    TVINSERTSTRUCTA ins{};
-    ins.hParent = parent;
-    ins.hInsertAfter = TVI_LAST;
-    ins.item.mask = TVIF_TEXT | TVIF_PARAM;
-    ins.item.pszText = label;
-    ins.item.lParam = sceneNode;
-    return TreeView_InsertItem(tree, &ins);
-}
-
-// Inserta en el arbol el contenido de una carpeta de disco (carpetas
-// primero, luego archivos, alfabetico), de forma recursiva. Solo para
-// los grupos sinteticos Scripts y Assets.
-void insertDirRecursive(HWND tree, HTREEITEM parent, const std::string& dir) {
-    std::error_code ec;
-    if (!std::filesystem::is_directory(dir, ec)) return;
-    std::vector<std::string> dirs;
-    std::vector<std::string> files;
-    for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
-        const std::string name = entry.path().filename().string();
-        if (entry.is_directory(ec)) {
-            dirs.push_back(name);
-        } else {
-            files.push_back(name);
-        }
-    }
-    std::sort(dirs.begin(), dirs.end());
-    std::sort(files.begin(), files.end());
-    for (const std::string& d : dirs) {
-        HTREEITEM item = addTreeChild(tree, parent, d);
-        insertDirRecursive(tree, item, (std::filesystem::path(dir) / d).string());
-    }
-    for (const std::string& f : files) {
-        addTreeChild(tree, parent, f);
-    }
-}
-
-// Busca un nodo por InstanceId recorriendo el arbol completo (por debajo
-// de item en profundidad). Devuelve nullptr si no existe.
-HTREEITEM findTreeItemByIdRec(HWND tree, HTREEITEM item, LPARAM id) {
-    while (item) {
-        TVITEMA tvi{};
-        tvi.hItem = item;
-        tvi.mask = TVIF_PARAM;
-        TreeView_GetItem(tree, &tvi);
-        if (tvi.lParam == id) return item;
-
-        HTREEITEM child = TreeView_GetChild(tree, item);
-        if (child) {
-            HTREEITEM hit = findTreeItemByIdRec(tree, child, id);
-            if (hit) return hit;
-        }
-        item = TreeView_GetNextSibling(tree, item);
-    }
-    return nullptr;
-}
-
-HTREEITEM findTreeItemById(HWND tree, LPARAM id) {
-    return findTreeItemByIdRec(tree, TreeView_GetRoot(tree), id);
-}
-
-// Inserta en el arbol el subarbol del World a partir de id (id primero,
-// luego sus hijos en orden). Guarda el InstanceId en lParam.
-void insertWorldSubtree(HWND tree, HTREEITEM parent, const World& world,
-                        InstanceId id, HTREEITEM* last = nullptr) {
-    const Instance* inst = world.find(id);
-    if (!inst) return;
-    HTREEITEM item =
-        addTreeChild(tree, parent, inst->name(), static_cast<LPARAM>(id));
-    if (last) *last = item;
-    for (InstanceId child : inst->children()) {
-        insertWorldSubtree(tree, item, world, child, last);
-    }
 }
 
 // Escribe un campo Transform (ids 200..208) con formato compacto.
@@ -470,8 +363,7 @@ bool PlaceView::create(void* parentHwnd) {
         wc.lpszClassName = kPanelClass;
         RegisterClassExA(&wc);
 
-        INITCOMMONCONTROLSEX icc{sizeof(icc),
-                                 ICC_TREEVIEW_CLASSES | ICC_STANDARD_CLASSES};
+        INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_STANDARD_CLASSES};
         InitCommonControlsEx(&icc);
 
         registered = true;
@@ -495,44 +387,40 @@ bool PlaceView::create(void* parentHwnd) {
         return false;
     }
 
-    // Explorer: arbol oscuro con la raiz dimension01. Sin los botones
-    // +/- nativos (TVS_HASBUTTONS): los triangulitos de cascada los
-    // pinta la subclase del arbol para igualar el estilo de Properties.
-    HWND tree = CreateWindowExA(0, WC_TREEVIEWA, "",
-                                WS_CHILD | WS_VISIBLE |
-                                TVS_HASLINES | TVS_LINESATROOT |
-                                TVS_SHOWSELALWAYS,
-                                6, kHeaderHeight + 6, kExplorerWidth - 12, 100,
-                                static_cast<HWND>(explorer_),
-                                reinterpret_cast<HMENU>(static_cast<INT_PTR>(1)),
-                                inst, nullptr);
-    tree_ = tree;
-    SendMessageA(tree, WM_SETFONT, reinterpret_cast<WPARAM>(theme::uiFont()), TRUE);
-    TreeView_SetBkColor(tree, theme::listBackground());
-    TreeView_SetTextColor(tree, theme::text());
-    TreeView_SetLineColor(tree, theme::border());
-    SetWindowSubclass(tree,
-                      reinterpret_cast<SUBCLASSPROC>(&PlaceView::treeSubclassProc),
-                      1, reinterpret_cast<DWORD_PTR>(this));
-    // Grupos de nivel superior: Dimensions / Scripts. El contenido lo
-    // rellena rebuildTree; los Assets van a su propia pestana.
-    root_ = addTreeRoot(tree, kDimensionsGroup);
-    addTreeRoot(tree, kScriptsGroup);
-
-    // Pestana Assets: arbol propio del explorador de recursos, hermano
-    // del de Explorer (se muestran alternos).
-    HWND assetsTree = CreateWindowExA(
-        0, WC_TREEVIEWA, "",
-        WS_CHILD | TVS_HASLINES | TVS_LINESATROOT | TVS_SHOWSELALWAYS, 6,
-        kHeaderHeight + 6, kExplorerWidth - 12, 100,
-        static_cast<HWND>(explorer_),
-        reinterpret_cast<HMENU>(static_cast<INT_PTR>(2)), inst, nullptr);
-    assetsTree_ = assetsTree;
-    SendMessageA(assetsTree, WM_SETFONT,
-                 reinterpret_cast<WPARAM>(theme::uiFont()), TRUE);
-    TreeView_SetBkColor(assetsTree, theme::listBackground());
-    TreeView_SetTextColor(assetsTree, theme::text());
-    TreeView_SetLineColor(assetsTree, theme::border());
+    // Explorer: TreeWidget dibujado a mano, alimentado por el TreeModel
+    // (filas de 22 px virtualizadas, sangria real, icono por clase, boton
+    // "+" solo en la fila bajo el raton, renombrado en linea y arrastrar y
+    // soltar con fila fantasma y tres zonas).
+    treeWidget_.create(static_cast<HWND>(explorer_), 6, kHeaderHeight + 6,
+                       kExplorerWidth - 12, 100);
+    treeWidget_.setModel(&treeModel_);
+    treeWidget_.setOnSelectionChanged(
+        [this](const std::vector<ui::NodeId>&) { notifySelection(); });
+    treeWidget_.setOnAddRequested([this](ui::NodeId id, const RECT& anchor) {
+        POINT pt{anchor.left, anchor.bottom};
+        openClassPicker(static_cast<InstanceId>(id), pt);
+    });
+    treeWidget_.setOnRenameRequested([this](ui::NodeId id,
+                                            const std::string& name) {
+        if (onNameEdited_) onNameEdited_(static_cast<InstanceId>(id), name);
+    });
+    treeWidget_.setOnDeleteRequested(
+        [this](const std::vector<ui::NodeId>& ids) {
+            if (!onDelete_) return;
+            std::vector<InstanceId> out;
+            out.reserve(ids.size());
+            for (ui::NodeId n : ids) {
+                out.push_back(static_cast<InstanceId>(n));
+            }
+            onDelete_(out);
+        });
+    treeWidget_.setOnReparentRequested(
+        [this](ui::NodeId child, ui::NodeId parent, int index) {
+            if (onReparent_) {
+                onReparent_(static_cast<InstanceId>(child),
+                            static_cast<InstanceId>(parent), index);
+            }
+        });
 
     // Pestana Output: EDIT multiline de solo lectura que recibe los
     // mensajes de SK_INFO/WARN/ERROR.
@@ -704,12 +592,15 @@ bool PlaceView::create(void* parentHwnd) {
 
 void PlaceView::destroy() {
     ClassPicker::close();
-    if (tree_) {
-        RemoveWindowSubclass(static_cast<HWND>(tree_),
-                             reinterpret_cast<SUBCLASSPROC>(
-                                 &PlaceView::treeSubclassProc),
-                             1);
+    // Deja de escuchar el World: los eventos apuntan a este objeto, que
+    // esta a punto de desaparecer.
+    if (worldEvents_) {
+        worldEvents_->onAdded(nullptr);
+        worldEvents_->onRemoved(nullptr);
+        worldEvents_->onReparented(nullptr);
+        worldEvents_ = nullptr;
     }
+    treeWidget_.destroy();
     if (explorer_) {
         DestroyWindow(static_cast<HWND>(explorer_));
         explorer_ = nullptr;
@@ -718,222 +609,33 @@ void PlaceView::destroy() {
         DestroyWindow(static_cast<HWND>(properties_));
         properties_ = nullptr;
     }
-    tree_ = nullptr;
-    root_ = nullptr;
-    dragItem_ = nullptr;
-    dropTarget_ = nullptr;
-    dragging_ = false;
+    output_ = nullptr;  // era hijo de properties_
 }
 
-long long __stdcall PlaceView::treeSubclassProc(void* hwndPtr,
-                                                unsigned int msg,
-                                                unsigned long long wParam,
-                                                long long lParam,
-                                                unsigned long long subclassId,
-                                                unsigned long long refData) {
-    (void)subclassId;  // el default (DefSubclassProc) no lo recibe
-    HWND hwnd = static_cast<HWND>(hwndPtr);
-    PlaceView* self = reinterpret_cast<PlaceView*>(refData);
-
-    // Lee el InstanceId guardado en un nodo (para el drag & drop).
-    auto readNodeId = [](HWND tree, HTREEITEM item) -> InstanceId {
-        if (!item) return kInvalidId;
-        TVITEMA tvi{};
-        tvi.hItem = item;
-        tvi.mask = TVIF_PARAM;
-        TreeView_GetItem(tree, &tvi);
-        return static_cast<InstanceId>(tvi.lParam);
-    };
-
-    switch (msg) {
-        case WM_PAINT: {
-            // Pinta el arbol y luego los triangulitos de cascada sobre
-            // cada nodo visible que tenga hijos (mismo estilo que las
-            // categorias de Properties).
-            PAINTSTRUCT ps{};
-            HDC hdc = BeginPaint(hwnd, &ps);
-            DefSubclassProc(hwnd, WM_PAINT, reinterpret_cast<WPARAM>(hdc), 0);
-            if (self && self->tree_ == hwnd) {
-                HTREEITEM item = TreeView_GetFirstVisible(hwnd);
-                while (item) {
-                    if (TreeView_GetChild(hwnd, item)) {
-                        RECT text{};
-                        if (TreeView_GetItemRect(hwnd, item, &text, TRUE)) {
-                            // Solo los niveles anidados llevan triangulo:
-                            // la raiz (nivel 0) lo dejaria cortado.
-                            if (text.left >= 14) {
-                                const int cy =
-                                    (text.top + text.bottom) / 2;
-                                const int tri[4] = {text.left - 13, cy - 7,
-                                                    text.left - 1, cy + 7};
-                                const bool open =
-                                    (TreeView_GetItemState(hwnd, item,
-                                                           TVIS_EXPANDED) &
-                                     TVIS_EXPANDED) != 0;
-                                drawTriangle(hdc, tri, open);
-                            }
-                        }
-                    }
-                    item = TreeView_GetNextVisible(hwnd, item);
-                }
-                // Boton "+" de los nodos de escena, alineado al borde
-                // derecho del arbol (una cruz).
-                RECT cli{};
-                GetClientRect(hwnd, &cli);
-                const int plusCx = cli.right - 12;
-                item = TreeView_GetFirstVisible(hwnd);
-                while (item) {
-                    TVITEMA tvi{};
-                    tvi.hItem = item;
-                    tvi.mask = TVIF_PARAM;
-                    TreeView_GetItem(hwnd, &tvi);
-                    if (tvi.lParam != 0) {
-                        RECT r{};
-                        if (TreeView_GetItemRect(hwnd, item, &r, TRUE)) {
-                            const int cy = (r.top + r.bottom) / 2;
-                            const int h = 4;
-                            HPEN pen = CreatePen(PS_SOLID, 1, theme::textDisabled());
-                            HPEN oldPen = static_cast<HPEN>(SelectObject(hdc, pen));
-                            MoveToEx(hdc, plusCx - h, cy, nullptr);
-                            LineTo(hdc, plusCx + h + 1, cy);
-                            MoveToEx(hdc, plusCx, cy - h, nullptr);
-                            LineTo(hdc, plusCx, cy + h + 1);
-                            SelectObject(hdc, oldPen);
-                            DeleteObject(pen);
-                        }
-                    }
-                    item = TreeView_GetNextVisible(hwnd, item);
-                }
-            }
-            EndPaint(hwnd, &ps);
-            return 0;
-        }
-        case WM_LBUTTONDOWN: {
-            // Click en el boton "+" de un nodo: abre el selector de clase.
-            if (self && self->tree_ == hwnd) {
-                const int x = static_cast<short>(LOWORD(lParam));
-                const int y = static_cast<short>(HIWORD(lParam));
-                RECT cli{};
-                GetClientRect(hwnd, &cli);
-                if (x >= cli.right - 24) {
-                    TVHITTESTINFO hit{};
-                    hit.pt.x = x;
-                    hit.pt.y = y;
-                    HTREEITEM under = TreeView_HitTest(hwnd, &hit);
-                    if (under) {
-                        TVITEMA tvi{};
-                        tvi.hItem = under;
-                        tvi.mask = TVIF_PARAM;
-                        TreeView_GetItem(hwnd, &tvi);
-                        if (tvi.lParam != 0) {
-                            self->openClassPicker(
-                                hwnd, static_cast<InstanceId>(tvi.lParam));
-                            return 0;
-                        }
-                    }
-                }
-            }
-            // Click en un triangulito de cascada: plegar/desplegar el
-            // nodo sin cambiar la seleccion.
-            if (self && self->tree_ == hwnd) {
-                const int x = static_cast<short>(LOWORD(lParam));
-                const int y = static_cast<short>(HIWORD(lParam));
-                HTREEITEM item = TreeView_GetFirstVisible(hwnd);
-                while (item) {
-                    if (TreeView_GetChild(hwnd, item)) {
-                        RECT text{};
-                        if (TreeView_GetItemRect(hwnd, item, &text, TRUE) &&
-                            text.left >= 14) {
-                            const int cy = (text.top + text.bottom) / 2;
-                            if (x >= text.left - 13 && x < text.left - 1 &&
-                                y >= cy - 7 && y < cy + 7) {
-                                const bool open =
-                                    (TreeView_GetItemState(hwnd, item,
-                                                           TVIS_EXPANDED) &
-                                     TVIS_EXPANDED) != 0;
-                                TreeView_Expand(hwnd, item,
-                                                open ? TVE_COLLAPSE
-                                                     : TVE_EXPAND);
-                                InvalidateRect(hwnd, nullptr, TRUE);
-                                return 0;
-                            }
-                        }
-                    }
-                    item = TreeView_GetNextVisible(hwnd, item);
-                }
-            }
-            break;
-        }
-        case WM_MOUSEMOVE: {
-            // Durante el arrastre resalta el nodo de destino (lo deja en
-            // nulo si el cursor no esta sobre ningun nodo valido).
-            if (self && self->tree_ == hwnd && self->dragging_) {
-                const int x = static_cast<short>(LOWORD(lParam));
-                const int y = static_cast<short>(HIWORD(lParam));
-                HTREEITEM target = nullptr;
-                TVHITTESTINFO hit{};
-                hit.pt.x = x;
-                hit.pt.y = y;
-                HTREEITEM under = TreeView_HitTest(hwnd, &hit);
-                if (under && under != self->dragItem_) target = under;
-                if (target != self->dropTarget_) {
-                    TreeView_SelectDropTarget(hwnd, target);
-                    self->dropTarget_ = target;
-                }
-                return 0;
-            }
-            break;
-        }
-        case WM_LBUTTONUP: {
-            // Fin del arrastre: notifica al dueno para re-agrupar.
-            if (self && self->tree_ == hwnd && self->dragging_) {
-                self->dragging_ = false;
-                TreeView_SelectDropTarget(hwnd, nullptr);
-                HTREEITEM target = self->dropTarget_;
-                HTREEITEM dragged = self->dragItem_;
-                self->dropTarget_ = nullptr;
-                self->dragItem_ = nullptr;
-                ReleaseCapture();
-
-                InstanceId childId = kInvalidId;
-                InstanceId parentId = kInvalidId;
-                if (dragged && target && dragged != target &&
-                    dragged != static_cast<HTREEITEM>(self->root_)) {
-                    // El nodo arrastrado pasa a ser hijo del nodo bajo el
-                    // cursor. Soltar X sobre Y deja a X dentro de Y.
-                    childId = readNodeId(hwnd, dragged);
-                    if (target == static_cast<HTREEITEM>(self->root_)) {
-                        // Suelta sobre el grupo Dimensions: el arrastrado
-                        // vuelve a la dimension raiz (parent = ninguno).
-                        parentId = kInvalidId;
-                    } else {
-                        // Soltar X sobre Y: X queda dentro de Y.
-                        parentId = readNodeId(hwnd, target);
-                    }
-                }
-                if (childId != kInvalidId && self->onReparent_) {
-                    self->onReparent_(childId, parentId);
-                }
-                return 0;
-            }
-            break;
-        }
-        default:
-            break;
-    }
-    return DefSubclassProc(hwnd, msg, wParam, lParam);
-}
-
-// Expande un nodo y todos sus descendientes (para que la jerarquia
-// cargada se vea entera al abrir/deshacer). parent es la raiz o un
-// nodo cualquiera; expande todos sus hijos en profundidad.
-void expandAll(HWND tree, HTREEITEM parent) {
-    HTREEITEM child = TreeView_GetChild(tree, parent);
-    while (child) {
-        TreeView_Expand(tree, child, TVE_EXPAND);
-        expandAll(tree, child);
-        child = TreeView_GetNextSibling(tree, child);
-    }
+void PlaceView::setWorld(World* world) {
+    world_ = world;
+    worldEvents_ = world;
+    treeModel_.setWorld(world);
+    treeModel_.expandAll();
+    if (treeWidget_.hwnd()) treeWidget_.refresh();
+    if (!world) return;
+    // El Explorer se suscribe a los eventos estructurales del World: alta,
+    // baja y reubicacion refrescan solo lo afectado (el renombrado llega
+    // por renameTreeItem). Los cambios de propiedades (onChanged) NO se
+    // escuchan para no repintar en cada frame de un arrastre de gizmo.
+    world->onAdded([this](InstanceId id, InstanceId parent) {
+        treeModel_.onAdded(id, parent);
+        if (treeWidget_.hwnd()) treeWidget_.refresh();
+    });
+    world->onRemoved([this](InstanceId id) {
+        treeModel_.onRemoved(id);
+        if (treeWidget_.hwnd()) treeWidget_.refresh();
+    });
+    world->onReparented([this](InstanceId id, InstanceId oldParent,
+                               InstanceId newParent) {
+        treeModel_.onReparented(id, oldParent, newParent);
+        if (treeWidget_.hwnd()) treeWidget_.refresh();
+    });
 }
 
 void PlaceView::setVisible(bool visible) {
@@ -947,96 +649,31 @@ void PlaceView::resize(int width, int height) {
 }
 
 void PlaceView::rebuildTree(const World& world) {
-    if (!tree_) return;
-    HWND tree = static_cast<HWND>(tree_);
-    clearObjects();
-
-    // Grupos de nivel superior (Explorer): Dimensions y Scripts.
-    root_ = addTreeRoot(tree, kDimensionsGroup);
-    HTREEITEM scriptsGroup = addTreeRoot(tree, kScriptsGroup);
-    const HTREEITEM dimGroup = static_cast<HTREEITEM>(root_);
-
-    // Dimensiones y sus subarboles (Workspace, Camera, Lighting, Scripts).
-    HTREEITEM last = nullptr;
-    for (InstanceId dim : world.dimensions()) {
-        insertWorldSubtree(tree, dimGroup, world, dim, &last);
+    // La primera vez (o tras cambiar de World) se fija el modelo y se
+    // despliega todo. Las siguientes reconstrucciones solo refrescan: los
+    // eventos del World ya mantienen el modelo al dia y asi no se pierde
+    // el estado de expansion al insertar, deshacer, etc.
+    if (treeModel_.world() != &world) {
+        treeModel_.setWorld(&world);
+        treeModel_.expandAll();
     }
-
-    // Scripts globales del proyecto (Server/Shared/Player/Character), con
-    // los archivos de disco colgando de cada uno.
-    {
-        const InstanceId scripts = world.globalScripts();
-        if (scripts != kInvalidId) {
-            insertWorldSubtree(tree, scriptsGroup, world, scripts, &last);
-            if (!scriptsRoot_.empty() && world.find(scripts)) {
-                for (InstanceId root : world.find(scripts)->children()) {
-                    const Instance* folder = world.find(root);
-                    if (!folder) continue;
-                    HTREEITEM item = addTreeChild(tree, scriptsGroup,
-                                                  folder->name(),
-                                                  static_cast<LPARAM>(root));
-                    insertDirRecursive(
-                        tree, item,
-                        (std::filesystem::path(scriptsRoot_) / folder->name())
-                            .string());
-                }
-            }
-        }
-    }
-
-    expandAll(tree, dimGroup);
-    TreeView_Expand(tree, scriptsGroup, TVE_EXPAND);
-    if (last) TreeView_Select(tree, last, TVGN_CARET);
-
-    // Pestana Assets: biblioteca de recursos (carpetas base siempre
-    // presentes) en su propio arbol.
-    if (assetsTree_) {
-        HWND at = static_cast<HWND>(assetsTree_);
-        TreeView_DeleteAllItems(at);
-        for (int i = 0; i < kAssetFolderCount; ++i) {
-            HTREEITEM item = addTreeRoot(at, kAssetFolders[i]);
-            TreeView_Expand(at, item, TVE_EXPAND);
-            if (!assetsRoot_.empty()) {
-                const std::filesystem::path dir =
-                    std::filesystem::path(assetsRoot_) / kAssetFolders[i];
-                insertDirRecursive(at, item, dir.string());
-                TreeView_Expand(at, item, TVE_EXPAND);
-            }
-        }
-    }
+    if (treeWidget_.hwnd()) treeWidget_.refresh();
 }
 
 void PlaceView::clearObjects() {
-    if (!tree_) return;
-    HWND tree = static_cast<HWND>(tree_);
-    HTREEITEM item = TreeView_GetRoot(tree);
-    while (item) {
-        HTREEITEM next = TreeView_GetNextSibling(tree, item);
-        TreeView_DeleteItem(tree, item);
-        item = next;
-    }
-    root_ = nullptr;
+    treeWidget_.select(std::vector<ui::NodeId>{}, 0);
+    if (treeWidget_.hwnd()) treeWidget_.refresh();
 }
 
-void PlaceView::renameTreeItem(InstanceId id, const std::string& newName) {
-    if (!tree_ || id == kInvalidId) return;
-    HWND tree = static_cast<HWND>(tree_);
-    HTREEITEM item = findTreeItemById(tree, static_cast<LPARAM>(id));
-    if (!item) return;
-    char label[260]{};
-    lstrcpynA(label, newName.c_str(), 260);
-    TVITEMA set{};
-    set.hItem = item;
-    set.mask = TVIF_TEXT;
-    set.pszText = label;
-    TreeView_SetItem(tree, &set);
+void PlaceView::renameTreeItem(InstanceId id, const std::string&) {
+    // El texto se lee del World: basta repintar la fila afectada.
+    if (id == kInvalidId) return;
+    treeWidget_.invalidateRow(static_cast<ui::NodeId>(id));
 }
 
 void PlaceView::removeTreeItem(InstanceId id) {
-    if (!tree_ || id == kInvalidId) return;
-    HWND tree = static_cast<HWND>(tree_);
-    HTREEITEM item = findTreeItemById(tree, static_cast<LPARAM>(id));
-    if (item) TreeView_DeleteItem(tree, item);
+    if (id == kInvalidId) return;
+    if (treeWidget_.hwnd()) treeWidget_.refresh();
 }
 
 // Rellena los EDIT de Attributes (700) y Tags (701) con el contenido del
@@ -1241,41 +878,31 @@ void PlaceView::showMultiple(int count) {
 }
 
 void PlaceView::syncTreeSelection(InstanceId primary) {
-    if (!tree_) return;
+    if (!treeWidget_.hwnd()) return;
     if (primary == kInvalidId) {
         suppressNotify_ = true;
-        TreeView_Select(static_cast<HWND>(tree_), nullptr, TVGN_CARET);
+        treeWidget_.select(std::vector<ui::NodeId>{}, 0);
         suppressNotify_ = false;
         return;
     }
-    // Busca en todo el arbol (los objetos pueden estar anidados).
-    HWND tree = static_cast<HWND>(tree_);
-    HTREEITEM found = findTreeItemById(tree, static_cast<LPARAM>(primary));
-    if (!found) return;
-    // Expande el padre para que el caret quede visible.
-    HTREEITEM parent = TreeView_GetParent(tree, found);
-    if (parent && parent != static_cast<HTREEITEM>(root_)) {
-        TreeView_Expand(tree, parent, TVE_EXPAND);
-    }
+    // Expande hasta el nodo, lo selecciona y lo lleva a la vista.
     suppressNotify_ = true;
-    TreeView_Select(tree, found, TVGN_CARET);
+    treeWidget_.scrollTo(static_cast<ui::NodeId>(primary));
+    treeWidget_.select(std::vector<ui::NodeId>{static_cast<ui::NodeId>(primary)},
+                       static_cast<ui::NodeId>(primary));
     suppressNotify_ = false;
 }
 
 void PlaceView::notifySelection() {
     if (suppressNotify_) return;
-    if (!onSelectionChanged_ || !tree_) return;
-    HWND tree = static_cast<HWND>(tree_);
-    HTREEITEM item = TreeView_GetSelection(tree);
-    if (!item) {
-        onSelectionChanged_(kInvalidId);
-        return;
+    if (!onSelectionChanged_) return;
+    const ui::NodeId p = treeWidget_.primary();
+    InstanceId id = kInvalidId;
+    if (p != 0 && p != ui::kTreeRootId && p != ui::kDimGroupId && world_ &&
+        world_->exists(static_cast<InstanceId>(p))) {
+        id = static_cast<InstanceId>(p);
     }
-    TVITEMA tvi{};
-    tvi.hItem = item;
-    tvi.mask = TVIF_PARAM;
-    TreeView_GetItem(tree, &tvi);
-    onSelectionChanged_(static_cast<InstanceId>(tvi.lParam));
+    onSelectionChanged_(id);
 }
 
 // Reescribe los resumenes "x, y, z" (ids 300..302) a partir de los
@@ -1602,17 +1229,9 @@ void PlaceView::layoutPanels(int width, int height) {
     MoveWindow(static_cast<HWND>(explorer_),
                width - kExplorerWidth, y, kExplorerWidth, panelH, TRUE);
 
-    if (tree_) {
-        MoveWindow(static_cast<HWND>(tree_), 6, kHeaderHeight + 6,
+    if (treeWidget_.hwnd()) {
+        MoveWindow(treeWidget_.hwnd(), 6, kHeaderHeight + 6,
                    kExplorerWidth - 12, panelH - kHeaderHeight - 12, TRUE);
-        ShowWindow(static_cast<HWND>(tree_),
-                   rightTab_ == 0 ? SW_SHOW : SW_HIDE);
-    }
-    if (assetsTree_) {
-        MoveWindow(static_cast<HWND>(assetsTree_), 6, kHeaderHeight + 6,
-                   kExplorerWidth - 12, panelH - kHeaderHeight - 12, TRUE);
-        ShowWindow(static_cast<HWND>(assetsTree_),
-                   rightTab_ == 1 ? SW_SHOW : SW_HIDE);
     }
 
     // El alto del panel cambio: se reenmarca el scroll y se recoloca.
@@ -1625,23 +1244,9 @@ void PlaceView::switchLeftTab(int tab) {
     InvalidateRect(static_cast<HWND>(properties_), nullptr, TRUE);
 }
 
-void PlaceView::switchRightTab(int tab) {
-    rightTab_ = (tab == 1) ? 1 : 0;
-    if (tree_) {
-        ShowWindow(static_cast<HWND>(tree_), rightTab_ == 0 ? SW_SHOW : SW_HIDE);
-    }
-    if (assetsTree_) {
-        ShowWindow(static_cast<HWND>(assetsTree_),
-                   rightTab_ == 1 ? SW_SHOW : SW_HIDE);
-    }
-    InvalidateRect(static_cast<HWND>(explorer_), nullptr, TRUE);
-}
-
-void PlaceView::openClassPicker(void* treeHwnd, InstanceId parentId) {
-    HWND owner = GetAncestor(static_cast<HWND>(treeHwnd), GA_ROOT);
-    POINT pt{};
-    GetCursorPos(&pt);
-    ClassPicker::open(owner, pt.x, pt.y,
+void PlaceView::openClassPicker(InstanceId parentId, POINT screenPoint) {
+    HWND owner = GetAncestor(treeWidget_.hwnd(), GA_ROOT);
+    ClassPicker::open(owner, screenPoint.x, screenPoint.y,
                       [this, parentId](const std::string& className) {
                           if (onInsertClass_) onInsertClass_(parentId, className);
                       });
@@ -1700,15 +1305,15 @@ long long __stdcall PlaceView::wndProc(void* hwndPtr, unsigned int msg,
                 DeleteObject(frame);
             }
 
-            // Barra de pestanas: izquierda (Properties|Output) o derecha
-            // (Explorer|Assets) segun el panel.
+            // Barra de pestanas: izquierda (Properties|Output) y derecha
+            // (Explorer; el grupo Assets vive dentro del propio arbol).
             if (self && hwnd == static_cast<HWND>(self->properties_)) {
                 static const char* kLeftTabs[2] = {"Properties", "Output"};
                 paintTabs(hdc, rc, kLeftTabs, 2, self->leftTab_);
             } else if (self &&
                        hwnd == static_cast<HWND>(self->explorer_)) {
-                static const char* kRightTabs[2] = {"Explorer", "Assets"};
-                paintTabs(hdc, rc, kRightTabs, 2, self->rightTab_);
+                static const char* kRightTabs[1] = {"Explorer"};
+                paintTabs(hdc, rc, kRightTabs, 1, 0);
             }
 
             // Triangulitos de las cascadas (solo en Properties; las
@@ -1765,21 +1370,6 @@ long long __stdcall PlaceView::wndProc(void* hwndPtr, unsigned int msg,
                         RECT tr = tabRect(rc, i, 2);
                         if (x >= tr.left && x < tr.right) {
                             if (self->leftTab_ != i) self->switchLeftTab(i);
-                            return 0;
-                        }
-                    }
-                }
-            }
-            if (self && hwnd == static_cast<HWND>(self->explorer_)) {
-                const int x = static_cast<short>(LOWORD(lParam));
-                const int y = static_cast<short>(HIWORD(lParam));
-                if (y < kHeaderHeight) {
-                    RECT rc{};
-                    GetClientRect(hwnd, &rc);
-                    for (int i = 0; i < 2; ++i) {
-                        RECT tr = tabRect(rc, i, 2);
-                        if (x >= tr.left && x < tr.right) {
-                            if (self->rightTab_ != i) self->switchRightTab(i);
                             return 0;
                         }
                     }
@@ -2091,49 +1681,6 @@ long long __stdcall PlaceView::wndProc(void* hwndPtr, unsigned int msg,
                                    self->pivotText_[id - kIdPivotBase].c_str());
                 }
                 return 0;
-            }
-            break;
-        }
-        case WM_NOTIFY: {
-            auto* hdr = reinterpret_cast<NMHDR*>(lParam);
-            if (self && self->tree_ &&
-                hdr->hwndFrom == static_cast<HWND>(self->tree_)) {
-                if (hdr->code == TVN_SELCHANGEDA ||
-                    hdr->code == TVN_SELCHANGEDW) {
-                    self->notifySelection();
-                    return 0;
-                }
-                // Inicio del arrastre del Explorer (clic sostenido sobre
-                // un nodo): engancha el raton y da control al subclass.
-                if ((hdr->code == TVN_BEGINDRAGA ||
-                     hdr->code == TVN_BEGINDRAGW) &&
-                    !self->dragging_) {
-                    HTREEITEM item = nullptr;
-                    if (hdr->code == TVN_BEGINDRAGA) {
-                        item = reinterpret_cast<LPNMTREEVIEWA>(lParam)
-                                   ->itemNew.hItem;
-                    } else {
-                        item = reinterpret_cast<LPNMTREEVIEWW>(lParam)
-                                   ->itemNew.hItem;
-                    }
-                    if (item &&
-                        item != static_cast<HTREEITEM>(self->root_)) {
-                        self->dragItem_ = item;
-                        self->dropTarget_ = nullptr;
-                        self->dragging_ = true;
-                        SetCapture(static_cast<HWND>(self->tree_));
-                        SetCursor(LoadCursorA(nullptr, IDC_ARROW));
-                    }
-                    return 0;
-                }
-                // Al expandir/plegar repinta el arbol para que los
-                // triangulitos salgan en su sitio.
-                if (hdr->code == TVN_ITEMEXPANDEDA ||
-                    hdr->code == TVN_ITEMEXPANDEDW) {
-                    InvalidateRect(static_cast<HWND>(self->tree_), nullptr,
-                                   TRUE);
-                    return 0;
-                }
             }
             break;
         }

@@ -9,6 +9,8 @@
 
 #include "../scene/instance.h"
 #include "../scene/world.h"
+#include "kit/tree_model.h"
+#include "kit/tree_widget.h"
 
 namespace sk {
 
@@ -43,8 +45,10 @@ public:
     void setScriptsRoot(const std::string& path) { scriptsRoot_ = path; }
     void setAssetsRoot(const std::string& path) { assetsRoot_ = path; }
 
-    // World que alimenta el Explorer y las Properties. No se posee.
-    void setWorld(const World* world) { world_ = world; }
+    // World que alimenta el Explorer y las Properties. No se posee. Al
+    // fijarlo, el Explorer se suscribe a los eventos del World (alta,
+    // baja y reubicacion) para refrescar solo lo que cambia.
+    void setWorld(World* world);
 
     // Panel Output (pestana izquierda): agrega una linea con el color
     // segun el nivel (0 info, 1 aviso, 2 error). El dueno engancha aqui
@@ -86,13 +90,19 @@ public:
         onSelectionChanged_ = std::move(cb);
     }
 
-    // Arrastrar un objeto del Explorer y soltarlo sobre otro: el objeto
-    // soltado (parent) absorbe al de debajo del cursor (child), que
-    // queda anidado dentro de el. Si el destino es el grupo Dimensions,
-    // child vuelve a la dimension raiz (parent = kInvalidId).
+    // Arrastrar un objeto del Explorer y soltarlo: dentro de otro (Inside),
+    // antes o despues (reordenar entre hermanos). index < 0 = al final.
     void setOnReparent(
-        std::function<void(InstanceId child, InstanceId parent)> cb) {
+        std::function<void(InstanceId child, InstanceId newParent, int index)>
+            cb) {
         onReparent_ = std::move(cb);
+    }
+
+    // Tecla Supr en el Explorer: el dueno borra los objetos indicados
+    // (con undo y guardado).
+    void setOnDeleteRequested(
+        std::function<void(const std::vector<InstanceId>&)> cb) {
+        onDelete_ = std::move(cb);
     }
 
     // Campo Transform (ids 200..208) editado.
@@ -160,36 +170,24 @@ public:
 private:
     static long long __stdcall wndProc(void* hwnd, unsigned int msg,
                                        unsigned long long wParam, long long lParam);
-    static long long __stdcall treeSubclassProc(void* hwnd, unsigned int msg,
-                                                unsigned long long wParam,
-                                                long long lParam,
-                                                unsigned long long subclassId,
-                                                unsigned long long refData);
     void layoutPanels(int width, int height);
     void layoutProperties();
     void updateSummaries();
     void notifySelection();
     void scrollBy(int dy);
     void switchLeftTab(int tab);
-    void switchRightTab(int tab);
 
     void* parent_ = nullptr;
     void* explorer_ = nullptr;
     void* properties_ = nullptr;
-    void* tree_ = nullptr;
     void* output_ = nullptr;      // EDIT multiline (pestana Output)
-    void* assetsTree_ = nullptr;  // TreeView (pestana Assets)
     int leftTab_ = 0;             // 0 Properties, 1 Output
-    int rightTab_ = 0;            // 0 Explorer, 1 Assets
-    void* root_ = nullptr;   // HTREEITEM del grupo "Dimensions"
+    ui::TreeModel treeModel_;     // modelo puro del Explorer
+    ui::TreeWidget treeWidget_;   // arbol dibujado a mano
+    World* worldEvents_ = nullptr;  // World cuyos eventos escucha el Explorer
     const World* world_ = nullptr;
     std::string scriptsRoot_;  // carpeta scripts/ del proyecto
     std::string assetsRoot_;   // carpeta assets/ del proyecto (o raiz)
-    // Arrastre del Explorer: nodo en curso, nodo de destino y si el raton
-    // esta enganchado.
-    HTREEITEM dragItem_ = nullptr;
-    HTREEITEM dropTarget_ = nullptr;
-    bool dragging_ = false;
     bool visible_ = false;
     bool suppressNotify_ = false;  // syncTreeSelection mueve el caret a mano
     InstanceId selectedId_ = kInvalidId;  // objeto seleccionado (0 = ninguno)
@@ -213,7 +211,7 @@ private:
     int scrollY_ = 0;
     int scrollContent_ = 0;
     std::function<void(InstanceId)> onSelectionChanged_;
-    std::function<void(InstanceId, InstanceId)> onReparent_;
+    std::function<void(InstanceId, InstanceId, int)> onReparent_;
     std::function<void(InstanceId, int, float)> onTransformEdited_;
     std::function<bool(InstanceId, const std::string&)> onNameEdited_;
     std::function<void(InstanceId, int, bool)> onBoolEdited_;
@@ -222,9 +220,11 @@ private:
     std::function<void(InstanceId, const std::string&)> onAttributesEdited_;
     std::function<void(InstanceId, const std::string&)> onTagsEdited_;
     std::function<void(InstanceId, const std::string&)> onInsertClass_;
+    std::function<void(const std::vector<InstanceId>&)> onDelete_;
 
-    // Abre el selector de clase del boton "+" para el nodo indicado.
-    void openClassPicker(void* treeHwnd, InstanceId parentId);
+    // Abre el selector de clase del boton "+" para el nodo indicado,
+    // anclado a un punto de pantalla.
+    void openClassPicker(InstanceId parentId, POINT screenPoint);
 };
 
 } // namespace sk

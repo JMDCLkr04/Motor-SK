@@ -114,7 +114,8 @@ private:
 // --- Reubicar ------------------------------------------------------------
 class ReparentCommand final : public Command {
 public:
-    ReparentCommand(const World& world, InstanceId id, InstanceId newParent)
+    ReparentCommand(const World& world, InstanceId id, InstanceId newParent,
+                    int index = -1)
         : id_(id), newParent_(newParent) {
         const Instance* inst = world.find(id);
         if (!inst) return;
@@ -124,8 +125,19 @@ public:
         oldParent_ = inst->parentId();
         oldName_ = inst->name();
         oldIndex_ = indexInParent(world, oldParent_, id);
-        newName_ = world.uniqueName(newParent, oldName_);
-        newIndex_ = childCount(world, newParent);
+        if (oldParent_ == newParent) {
+            // Reordenar entre hermanos: conserva el nombre (si se pidiera
+            // uno unico chocaria consigo mismo).
+            newName_ = oldName_;
+        } else {
+            newName_ = world.uniqueName(newParent, oldName_);
+        }
+        const size_t count = childCount(world, newParent);
+        if (index < 0 || static_cast<size_t>(index) > count) {
+            newIndex_ = count;
+        } else {
+            newIndex_ = static_cast<size_t>(index);
+        }
     }
 
     void apply(World& world) override {
@@ -584,6 +596,11 @@ CommandPtr makeRemoveCommand(const World& world, InstanceId id) {
 CommandPtr makeReparentCommand(const World& world, InstanceId id,
                                InstanceId newParent) {
     return std::make_unique<ReparentCommand>(world, id, newParent);
+}
+
+CommandPtr makeReparentCommand(const World& world, InstanceId id,
+                               InstanceId newParent, int index) {
+    return std::make_unique<ReparentCommand>(world, id, newParent, index);
 }
 
 CommandPtr makeRenameCommand(const World& world, InstanceId id,
