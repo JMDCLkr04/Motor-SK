@@ -3,6 +3,8 @@
 #include <windows.h>
 #include <windowsx.h>
 
+#include <string>
+
 #include "../core/log.h"
 #include "../ui/theme.h"
 
@@ -11,6 +13,16 @@ namespace sk {
 namespace {
 
 const char* kWindowClassName = "MotorSKWindow";
+
+// Clase de una ventana para los registros de foco/capture (--debug): los
+// enlaces de foco entre la ventana principal, el Explorer y los EDIT
+// explican varios fallos de teclado.
+std::string classNameOf(HWND h) {
+    if (!h) return "(null)";
+    char cls[64]{};
+    GetClassNameA(h, cls, static_cast<int>(sizeof(cls)));
+    return cls;
+}
 
 // Icono del programa (recurso 1 definido en app.rc a partir de logo.ico).
 // cx/cy a 0 => tamano estandar (SM_CXICON); LR_SHARED: no hay que
@@ -106,6 +118,27 @@ bool Window::pumpEvents() {
             shouldClose_ = true;
             break;
         }
+        // El teclado se alimenta aqui, para TODO el hilo, antes de
+        // despachar el mensaje: asi WASD, Supr y los atajos funcionan
+        // aunque el foco este en el Explorer, en Properties o en un
+        // cajetin (que es una ventana hija distinta). Los controles (EDIT,
+        // LISTBOX) siguen recibiendo su mensaje por DispatchMessage; los
+        // atajos del editor se gatean con input_.textFocus(), de modo que
+        // escribir en un EDIT no mueve la camara. onKeyDown/onKeyUp son
+        // idempotentes (solo marcan flanco en la transicion), asi que el
+        // manejador de la propia ventana no cuenta doble.
+        switch (msg.message) {
+            case WM_KEYDOWN:
+            case WM_SYSKEYDOWN:
+                input_.onKeyDown(static_cast<int>(msg.wParam));
+                break;
+            case WM_KEYUP:
+            case WM_SYSKEYUP:
+                input_.onKeyUp(static_cast<int>(msg.wParam));
+                break;
+            default:
+                break;
+        }
         TranslateMessage(&msg);
         DispatchMessageA(&msg);
     }
@@ -198,6 +231,9 @@ long long __stdcall Window::wndProc(void* hwndPtr, unsigned int msg, unsigned lo
             case WM_SETFOCUS: {
                 // El foco vuelve a la ventana: ningun campo de texto activo.
                 self->input_.setTextFocus(false);
+                SK_DEBUG("foco: principal (foco=%s capture=%s)",
+                         classNameOf(GetFocus()).c_str(),
+                         classNameOf(GetCapture()).c_str());
                 break;
             }
             case WM_KILLFOCUS: {
@@ -211,6 +247,9 @@ long long __stdcall Window::wndProc(void* hwndPtr, unsigned int msg, unsigned lo
                     text = lstrcmpiA(cls, "EDIT") == 0;
                 }
                 self->input_.setTextFocus(text);
+                SK_DEBUG("foco: %s (texto=%d capture=%s)",
+                         classNameOf(next).c_str(), text ? 1 : 0,
+                         classNameOf(GetCapture()).c_str());
                 break;
             }
             case WM_LBUTTONDOWN: {
@@ -224,6 +263,9 @@ long long __stdcall Window::wndProc(void* hwndPtr, unsigned int msg, unsigned lo
                 // bloqueadas por textInputFocused).
                 if (GetFocus() != hwnd) SetFocus(hwnd);
                 SetCapture(hwnd);
+                SK_DEBUG("raton: LMB abajo (foco=%s capture=%s)",
+                         classNameOf(GetFocus()).c_str(),
+                         classNameOf(GetCapture()).c_str());
                 return 0;
             }
             case WM_LBUTTONUP: {
@@ -244,6 +286,9 @@ long long __stdcall Window::wndProc(void* hwndPtr, unsigned int msg, unsigned lo
                 // debe quedar bloqueada tras haber escrito en Properties.
                 if (GetFocus() != hwnd) SetFocus(hwnd);
                 SetCapture(hwnd);
+                SK_DEBUG("raton: RMB abajo (foco=%s capture=%s)",
+                         classNameOf(GetFocus()).c_str(),
+                         classNameOf(GetCapture()).c_str());
                 return 0;
             }
             case WM_RBUTTONUP: {

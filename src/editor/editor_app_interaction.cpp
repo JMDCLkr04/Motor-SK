@@ -75,6 +75,17 @@ void EditorApp::frameInteraction(const FrameCtx& ctx) {
     const std::optional<Vec2> pressed = window_.consumeLeftPressed();
     const std::optional<Vec2> released = window_.consumeLeftReleased();
 
+    // Diagnostico (--debug): confirma que los clicks llegan al bucle y si
+    // caen dentro del viewport (bordes del panel izquierdo/derecho).
+    if (pressed) {
+        SK_DEBUG("raton: press (%.0f,%.0f) viewport=%d", pressed->x, pressed->y,
+                 inViewport(*pressed) ? 1 : 0);
+    }
+    if (released) {
+        SK_DEBUG("raton: release (%.0f,%.0f) viewport=%d", released->x,
+                 released->y, inViewport(*released) ? 1 : 0);
+    }
+
     if (pressed && inViewport(*pressed)) {
         bool startedGizmo = false;
         // El eje se recalcula con el punto exacto del press: el hover se
@@ -321,6 +332,10 @@ bool EditorApp::frameDraw(const FrameCtx& ctx) {
             modelCache_.push_back(part.model);
             shapeCache_.push_back(part.shape);
         }
+        SK_DEBUG("render: partes=%d visibles=%d dimActiva=%s",
+                 static_cast<int>(parts.size()),
+                 static_cast<int>(modelCache_.size()),
+                 worldName(activeDimension_).c_str());
         // Contorno celeste: el cubo alambre un 2% mas grande que el objeto,
         // para que asome por el borde de la malla.
         outlineCache_.clear();
@@ -387,6 +402,10 @@ bool EditorApp::frameDraw(const FrameCtx& ctx) {
         SK_ERROR("drawFrame fallo");
         return false;
     }
+    SK_DEBUG("frameDraw -> drawFrame: modelos=%d contornos=%d gizmo=%d",
+             static_cast<int>(modelCache_.size()),
+             static_cast<int>(outlineCache_.size()),
+             static_cast<int>(gizmoLines.size()));
     needsRedraw_ = false;
     lastDrawWall_ = nowSeconds();
     if (statsEnabled_) {

@@ -186,7 +186,7 @@ bool EditorApp::frame(const InputState& in) {
     }
 
     // Ventana Play/Run: su propio renderer, mismo bucle principal.
-    play_.renderFrame(world_, camera_);
+    play_.renderFrame(world_);
     // Stop activo solo mientras hay un test en marcha.
     workspace_.setRunning(play_.active());
 

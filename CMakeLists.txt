@@ -39,6 +39,7 @@ add_library(motorsk_model STATIC
     src/scene/collection_service.cpp
     src/scene/commands.cpp
     src/scene/world.cpp
+    src/platform/input_state.cpp
     src/editor/editor_commands.cpp
     src/editor/clipboard_controller.cpp
     src/editor/property_model.cpp

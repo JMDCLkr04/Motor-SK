@@ -16,8 +16,10 @@
 #include "editor/output_buffer.h"
 #include "editor/property_model.h"
 #include "editor/shortcut_map.h"
+#include "platform/input_state.h"
 #include "scene/commands.h"
 #include "scene/property_value.h"
+#include "scene/spawn.h"
 #include "scene/world.h"
 #include "ui/kit/tree_model.h"
 
@@ -1050,6 +1052,57 @@ void testOutputBuffer() {
     CHECK(small.at(2).text == "4");
 }
 
+// Posicion inicial de Play/Run: SpawnLocation si existe, (0,20,0) si no.
+void testPlaySpawnPosition() {
+    std::printf("testPlaySpawnPosition\n");
+    World w;
+    w.ensureStructure();
+
+    // Sin SpawnLocation: respaldo (0,20,0).
+    const Vec3 fallback = playSpawnPosition(w);
+    CHECK(fallback.x == 0.0f && fallback.y == 20.0f && fallback.z == 0.0f);
+
+    // Con SpawnLocation: usa su posicion.
+    const InstanceId ws = workspaceOf(w);
+    const InstanceId spawn = w.create("SpawnLocation", ws);
+    CHECK(spawn != kInvalidId);
+    w.setTransform(spawn, Vec3{3.0f, 4.0f, 5.0f}, Vec3{0.0f, 0.0f, 0.0f},
+                   Vec3{1.0f, 1.0f, 1.0f});
+    const Vec3 at = playSpawnPosition(w);
+    CHECK(at.x == 3.0f && at.y == 4.0f && at.z == 5.0f);
+}
+
+// Semantica de InputState en la que se apoya el teclado a nivel de hilo:
+// onKeyDown marca flanco solo en la transicion (no cuenta doble si lo ve
+// tanto el bucle como la ventana) y onKeyUp/clearKeys lo sueltan.
+void testInputStateEdges() {
+    std::printf("testInputStateEdges\n");
+    InputState in;
+    in.newFrame();
+    CHECK(!in.down('W') && !in.pressed('W'));
+
+    in.onKeyDown('W');
+    CHECK(in.down('W') && in.pressed('W'));
+
+    in.newFrame();
+    CHECK(in.down('W'));        // sigue pulsada
+    CHECK(!in.pressed('W'));    // el flanco dura un solo frame
+
+    in.onKeyDown('W');          // auto-repeat / doble alimentacion
+    CHECK(!in.pressed('W'));    // no vuelve a marcar flanco
+    CHECK(in.down('W'));
+
+    in.onKeyUp('W');
+    CHECK(!in.down('W'));
+
+    in.onKeyDown(InputState::kShift);
+    in.onKeyDown(InputState::kControl);
+    CHECK(in.shift() && in.ctrl());
+
+    in.clearKeys();
+    CHECK(!in.shift() && !in.ctrl() && !in.down('W') && !in.pressed('W'));
+}
+
 } // namespace
 
 int main() {
@@ -1077,6 +1130,8 @@ int main() {
     testTreeInvalidTargets();
     testTreePreorderUnorderedEvents();
     testTreeIcons();
+    testPlaySpawnPosition();
+    testInputStateEdges();
 
     std::printf("\n%d comprobaciones, %d fallos\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

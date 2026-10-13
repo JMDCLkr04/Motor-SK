@@ -314,3 +314,30 @@ build-asan\Debug\motorsk_tests.exe
 
 `build-asan/` está en `.gitignore`; los artefactos de build nunca se
 versionan.
+
+## Entrada de teclado y Play/Run
+
+- **Teclado a nivel de hilo.** `Window::pumpEvents` alimenta el `InputState`
+  con los `WM_KEYDOWN/WM_KEYUP` (y variantes `SYS`) *antes* de
+  `TranslateMessage`/`DispatchMessage`, para TODA la ventana del hilo. Así
+  WASD, Supr y los atajos funcionan aunque el foco esté en el Explorer, en
+  Properties o en un cajetín, que son ventanas hijas distintas. Los controles
+  (EDIT, LISTBOX) siguen recibiendo su mensaje; los atajos del editor se
+  gatean con `InputState::textFocus()` para que escribir no mueva la cámara.
+  `onKeyDown/onKeyUp` marcan flanco solo en la transición, así que el
+  manejador de la propia ventana no cuenta doble.
+- **Selector de clase del `+`.** El foco vive en el EDIT del filtro; una
+  subclase (`editProc`) intercepta Esc (cierra), Enter (elige) y las flechas
+  (mueven la selección sin sacar el foco). Un clic simple en la lista también
+  elige (`LBN_SELCHANGE`), además del doble clic.
+- **Cámara de Play/Run.** `PlayWindow` tiene su propia `Camera` y arranca en
+  `playSpawnPosition(world)` (`src/scene/spawn.h`): la posición del primer
+  `SpawnLocation`, o `(0,20,0)` si no hay. La lógica es pura y se prueba en
+  `testPlaySpawnPosition`. La ventana de Play abre con su propio renderer y
+  dibuja la escena cada frame desde el bucle principal.
+
+Con `--debug` el editor registra foco/capture de las ventanas, los clics
+(press/release y si caen en el viewport), los recuentos de render
+(`render: partes/visibles/dimActiva`), las llamadas a `drawFrame` y la
+apertura/elección del selector de clase, para diagnosticar fallos de entrada
+o de objetos invisibles sin depender de capturas de pantalla.

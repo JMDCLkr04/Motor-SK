@@ -6,6 +6,7 @@
 #include "../platform/window.h"
 #include "../render/renderer.h"
 #include "../scene/camera.h"
+#include "../scene/spawn.h"
 #include "../scene/world.h"
 
 namespace sk {
@@ -17,8 +18,13 @@ PlayWindow::~PlayWindow() { close(); }
 
 bool PlayWindow::open(const World& world, const Camera& camera,
                       bool runScripts) {
-    (void)world;
+    // La prueba arranca en su propio punto de aparicion (SpawnLocation) en
+    // vez de heredar la vista del editor.
     (void)camera;
+    const Vec3 spawn = playSpawnPosition(world);
+    camera_.setPosition(spawn);
+    SK_DEBUG("Play/Run: camara inicial en (%.1f,%.1f,%.1f)", spawn.x, spawn.y,
+             spawn.z);
     if (active_) return true;
 
     window_ = std::make_unique<Window>();
@@ -59,7 +65,7 @@ void PlayWindow::close() {
     run_ = false;
 }
 
-void PlayWindow::renderFrame(const World& world, const Camera& camera) {
+void PlayWindow::renderFrame(const World& world) {
     if (!active_ || !window_ || !renderer_) return;
     if (window_->closed()) {
         close();
@@ -73,7 +79,7 @@ void PlayWindow::renderFrame(const World& world, const Camera& camera) {
 
     const float aspect = static_cast<float>(w) / static_cast<float>(h);
     const Mat4 projection = perspective(radians(60.0f), aspect, 0.1f, 200.0f);
-    const Mat4 viewProj = projection * camera.view();
+    const Mat4 viewProj = projection * camera_.view();
 
     std::vector<Mat4> models;
     std::vector<int> shapes;

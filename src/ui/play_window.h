@@ -2,6 +2,8 @@
 
 #include <memory>
 
+#include "../scene/camera.h"
+
 namespace sk {
 
 class World;
@@ -30,12 +32,15 @@ public:
     bool active() const { return active_; }
 
     // Dibuja un frame de la escena (se llama desde el bucle principal
-    // mientras active()).
-    void renderFrame(const World& world, const Camera& camera);
+    // mientras active()). Usa la camara propia (arranca en el SpawnLocation).
+    void renderFrame(const World& world);
 
 private:
     std::unique_ptr<Window> window_;
     std::unique_ptr<Renderer> renderer_;
+    // Camara de la prueba: independiente de la del editor; arranca en el
+    // SpawnLocation (o (0,20,0)) al abrir.
+    Camera camera_;
     bool active_ = false;
     bool run_ = false;
 };

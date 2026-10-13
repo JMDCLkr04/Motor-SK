@@ -1,12 +1,14 @@
 #include "class_picker.h"
 
 #include <windows.h>
+#include <commctrl.h>
 
 #include <algorithm>
 #include <cstring>
 #include <string>
 #include <vector>
 
+#include "../core/log.h"
 #include "../scene/class_registry.h"
 #include "theme.h"
 
@@ -90,10 +92,50 @@ void pick(State* st) {
     const int sel = static_cast<int>(SendMessageA(st->list, LB_GETCURSEL, 0, 0));
     if (sel < 0 || sel >= static_cast<int>(st->filtered.size())) return;
     std::string className = st->filtered[sel];
+    SK_DEBUG("selector '+': elegido '%s'", className.c_str());
     auto cb = st->onPick;
     DestroyWindow(g_picker);
     g_picker = nullptr;
     if (cb) cb(className);
+}
+
+// El foco del popup vive en el EDIT (para escribir el filtro). El EDIT
+// consume WM_KEYDOWN y no lo reenvia, asi que Esc/Enter/flechas se
+// interceptan aqui por subclase. Enter elige, Esc cierra, las flechas
+// mueven la seleccion de la lista sin sacar el foco del cajetin.
+LRESULT CALLBACK editProc(HWND h, UINT msg, WPARAM wParam, LPARAM lParam,
+                          UINT_PTR idSubclass, DWORD_PTR refData) {
+    State* st = reinterpret_cast<State*>(refData);
+    (void)idSubclass;
+    if (msg == WM_KEYDOWN) {
+        if (wParam == VK_ESCAPE) {
+            SK_DEBUG("selector '+': Esc cierra");
+            if (g_picker) DestroyWindow(g_picker);
+            return 0;
+        }
+        if (wParam == VK_RETURN) {
+            pick(st);
+            return 0;
+        }
+        if (wParam == VK_DOWN || wParam == VK_UP) {
+            if (!st || !st->list) return 0;
+            const int count =
+                static_cast<int>(SendMessageA(st->list, LB_GETCOUNT, 0, 0));
+            if (count <= 0) return 0;
+            int sel =
+                static_cast<int>(SendMessageA(st->list, LB_GETCURSEL, 0, 0));
+            sel += (wParam == VK_DOWN) ? 1 : -1;
+            if (sel < 0) sel = 0;
+            if (sel >= count) sel = count - 1;
+            SendMessageA(st->list, LB_SETCURSEL, sel, 0);
+            SendMessageA(st->list, LB_SETTOPINDEX, sel, 0);
+            SK_DEBUG("selector '+': flecha mueve a %d de %d", sel, count);
+            return 0;
+        }
+    } else if (msg == WM_NCDESTROY) {
+        RemoveWindowSubclass(h, &editProc, idSubclass);
+    }
+    return DefSubclassProc(h, msg, wParam, lParam);
 }
 
 LRESULT CALLBACK pickerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -117,6 +159,8 @@ LRESULT CALLBACK pickerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 nullptr);
             SendMessageA(st->edit, WM_SETFONT,
                          reinterpret_cast<WPARAM>(theme::uiFont()), TRUE);
+            SetWindowSubclass(st->edit, &editProc, 1,
+                              reinterpret_cast<DWORD_PTR>(st));
             st->list = CreateWindowExA(
                 0, "LISTBOX", "",
                 WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY, 6,
@@ -136,6 +180,14 @@ LRESULT CALLBACK pickerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 return 0;
             }
             if (id == 2 && code == LBN_DBLCLK) {
+                pick(st);
+                return 0;
+            }
+            // Un clic simple sobre la lista tambien elige (antes solo el
+            // doble clic). La navegacion por teclado mueve la seleccion de
+            // forma programatica (LB_SETCURSEL), que no dispara este aviso,
+            // asi que no se elige al navegar con flechas.
+            if (id == 2 && code == LBN_SELCHANGE) {
                 pick(st);
                 return 0;
             }
@@ -215,6 +267,7 @@ void ClassPicker::open(void* ownerHwnd, int x, int y,
         delete st;
         return;
     }
+    SK_DEBUG("selector '+': abierto en (%d,%d)", x, y);
     ShowWindow(g_picker, SW_SHOW);
     SetForegroundWindow(g_picker);
 }
