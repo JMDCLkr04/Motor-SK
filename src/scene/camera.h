@@ -50,6 +50,11 @@ public:
             if (window.input().down('A')) move -= right;
             if (window.input().down('E')) move += kUp;
             if (window.input().down('Q')) move -= kUp;
+            //controles con flechas
+            if (window.input().down(kKeyUp)) move += forward();
+            if (window.input().down(kKeyDown)) move -= forward();
+            if (window.input().down(kKeyRight)) move += right;
+            if (window.input().down(kKeyLeft))  move -= right;
 
             float speed = kMoveSpeed;
             if (window.input().down(kKeyShift)) speed *= 3.0f;
@@ -107,6 +112,10 @@ private:
     static constexpr float kZoomStep = 0.6f;     // unidades por tick de rueda
     static constexpr float kMaxPitch = 1.5f;     // ~86 grados
     static constexpr int kKeyShift = 0x10;       // VK_SHIFT
+    static constexpr int kKeyLeft  = 0x25; // VK_LEFT
+    static constexpr int kKeyUp    = 0x26; // VK_UP
+    static constexpr int kKeyRight = 0x27; // VK_RIGHT
+    static constexpr int kKeyDown  = 0x28; // VK_DOWN
 
     static const Vec3 kUp;
 

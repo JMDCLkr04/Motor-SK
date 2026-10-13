@@ -7,7 +7,6 @@ CMakeUserPresets.json
 
 # IDE
 .vs/
-.vscode/
 .idea/
 *.user
 *.suo
@@ -29,3 +28,7 @@ desktop.ini
 
 # Logs de smoke test
 *.log
+branch_structure.json
+temp_auto_push.bat
+temp_interactive_push.bat
+.gitignore
