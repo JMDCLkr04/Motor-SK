@@ -74,12 +74,16 @@ void TreeModel::setWorld(const World* world) {
 std::string TreeModel::textOf(NodeId id) const {
     if (id == kDimGroupId) return "Dimensions";
     if (id == kTreeRootId) return std::string();
+    if (isScriptNode(id)) return scripts_->nameOf(id);
     const Instance* inst = world_ ? world_->find(id) : nullptr;
     return inst ? inst->name() : std::string();
 }
 
 IconId TreeModel::iconOf(NodeId id) const {
     if (id == kDimGroupId) return IconId::Dimension;
+    if (isScriptNode(id)) {
+        return scripts_->isDir(id) ? IconId::Folder : IconId::Script;
+    }
     const Instance* inst = world_ ? world_->find(id) : nullptr;
     if (!inst) return IconId::Part;
     // El nodo Assets estructural usa el icono de recursos; el resto, el de
@@ -90,6 +94,7 @@ IconId TreeModel::iconOf(NodeId id) const {
 
 bool TreeModel::isProtected(NodeId id) const {
     if (id == kTreeRootId || id == kDimGroupId) return true;
+    if (isScriptNode(id)) return false;  // los scripts se pueden renombrar/borrar
     const Instance* inst = world_ ? world_->find(id) : nullptr;
     return inst && inst->isProtected();
 }
@@ -97,6 +102,7 @@ bool TreeModel::isProtected(NodeId id) const {
 NodeId TreeModel::parentOf(NodeId id) const {
     if (id == kTreeRootId) return kInvalidId;
     if (id == kDimGroupId) return kTreeRootId;
+    if (isScriptNode(id)) return scripts_->parentOf(id);
     const Instance* inst = world_ ? world_->find(id) : nullptr;
     if (!inst) return kInvalidId;
     if (inst->parentId() == kInvalidId) {
@@ -120,6 +126,12 @@ std::vector<NodeId> TreeModel::childrenOf(NodeId id) const {
     if (id == kDimGroupId) return world_->dimensions();
     const Instance* inst = world_->find(id);
     if (inst) out = inst->children();
+    // Arbol de scripts en disco: bajo cada raiz del nodo Scripts se anaden
+    // los ficheros y carpetas del proyecto (ids sinteticos).
+    if (scripts_) {
+        const std::vector<NodeId> disk = scripts_->childrenOf(id);
+        out.insert(out.end(), disk.begin(), disk.end());
+    }
     return out;
 }
 

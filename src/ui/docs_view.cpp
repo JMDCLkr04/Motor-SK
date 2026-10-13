@@ -230,26 +230,37 @@ void DocsView::updateDetails() {
 
 void DocsView::layout(int width, int height) {
     if (!hwnd_) return;
-    const int y = editor::Layout::contentTopStatic();
-    int h = height - y;
-    if (h < 0) h = 0;
-    MoveWindow(static_cast<HWND>(hwnd_), 0, y, width, h, TRUE);
+    // La Referencia de clases vive en el area central (entre los paneles
+    // laterales compartidos), igual que el viewport 3D y el editor CODE.
+    const editor::Layout l = editor::Layout::compute(width, height);
+    const int vx = l.viewport.x;
+    const int vy = l.viewport.y;
+    const int vw = l.viewport.w;
+    const int vh = l.viewport.h;
+    MoveWindow(static_cast<HWND>(hwnd_), vx, vy, vw, vh, TRUE);
 
-    if (h <= 0) return;
+    if (vw <= 0 || vh <= 0) return;
 
-    const int detailX = kListWidth + 14;
-    const int detailW = width - detailX - 14;
+    // La lista de clases no puede comerse todo el ancho del area central.
+    int listW = kListWidth;
+    if (listW > vw - 120) listW = vw - 120;
+    if (listW < 80) listW = 80;
+    const int areaW = vw;
+    const int areaH = vh;
+
+    const int detailX = listW + 14;
+    const int detailW = areaW - detailX - 14;
     const int descH = 140;
 
     if (classList_.hwnd()) {
-        MoveWindow(classList_.hwnd(), 0, 0, kListWidth, h, TRUE);
+        MoveWindow(classList_.hwnd(), 0, 0, listW, areaH, TRUE);
         // La columna "Descripcion" se estira con el ancho de la lista.
-        int descW = kListWidth - kIconColWidth - kNameColWidth - 24;
+        int descW = listW - kIconColWidth - kNameColWidth - 24;
         if (descW < 60) descW = 60;
         classList_.setColumnWidths({kIconColWidth, kNameColWidth, descW});
     }
     if (divider_) {
-        MoveWindow(static_cast<HWND>(divider_), kListWidth, 0, 1, h, TRUE);
+        MoveWindow(static_cast<HWND>(divider_), listW, 0, 1, areaH, TRUE);
     }
     if (title_) {
         MoveWindow(static_cast<HWND>(title_), detailX, 10, detailW, 26, TRUE);
@@ -266,7 +277,7 @@ void DocsView::layout(int width, int height) {
     }
     if (propsList_.hwnd()) {
         const int propsY = 66 + descH + 36;
-        int propsH = h - propsY - 12;
+        int propsH = areaH - propsY - 12;
         if (propsH < 40) propsH = 40;
         MoveWindow(propsList_.hwnd(), detailX, propsY, detailW, propsH, TRUE);
     }

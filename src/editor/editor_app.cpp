@@ -258,6 +258,7 @@ void EditorApp::openProject(const std::string& folder) {
     place_.setScriptsRoot(sk::scripts::rootFolder(active_));
     place_.setAssetsRoot(active_.folder + "/assets");
     place_.setWorld(&world_);
+    place_.setProject(&active_); // arbol de scripts en disco en el Explorer
     place_.rebuildTree(world_); // Explorer con la jerarquia
     view3d_ = true;
     panel_.setVisible(false);
@@ -265,7 +266,9 @@ void EditorApp::openProject(const std::string& folder) {
     const int tab = workspace_.active();
     docs_.setVisible(false);
     workspace_.setDocsActive(false);
-    place_.setVisible(tab == 0);
+    // Los paneles laterales (Explorer + Properties/Output) son unicos y
+    // visibles en todas las divisiones; solo cambia el area central.
+    place_.setVisible(true);
     code_.setVisible(tab == 1);
     code_.open(active_);
     refreshDimensionsBar(); // tira de dimensiones: primera activa + visibilidad
@@ -290,6 +293,7 @@ void EditorApp::closeProject() {
     panel_.refresh();
     workspace_.setVisible(false);
     place_.setVisible(false);
+    place_.setProject(nullptr); // sin proyecto no hay arbol de scripts
     code_.setVisible(false);
     docs_.setVisible(false);
     SetWindowTextA(static_cast<HWND>(window_.nativeHandle()), "Motor SK");
@@ -361,10 +365,41 @@ void EditorApp::applySelection(std::vector<InstanceId> ids,
 }
 
 bool EditorApp::inViewport(const Vec2& p) const {
-    if (!view3d_ || !place_.visible()) return false;
+    if (!viewportVisible()) return false;
     const Layout layout = Layout::compute(window_.framebufferWidth(),
                                           window_.framebufferHeight());
     return layout.inViewport(static_cast<int>(p.x), static_cast<int>(p.y));
+}
+
+bool EditorApp::viewportVisible() const {
+    return view3d_ && !code_.visible() && !docs_.visible();
+}
+
+void EditorApp::setViewOption(int id, bool on) {
+    switch (id) {
+        case kViewGrid:
+            viewGrid_ = on;
+            break;
+        case kViewShadows:
+            viewShadows_ = on;
+            if (on) SK_INFO("Vista: sombras pendientes del renderer");
+            break;
+        case kViewWireframe:
+            viewWireframe_ = on;
+            if (on) SK_INFO("Vista: wireframe pendiente del renderer");
+            break;
+        case kViewStats:
+            statsEnabled_ = on;
+            statsFrames_ = 0;
+            statsAccum_ = 0.0;
+            statsWindowStart_ = nowSeconds();
+            break;
+        default:
+            break;
+    }
+    needsRedraw_ = true;
+    ++contentVersion_;
+    SK_INFO("Vista: opcion %d -> %s", id, on ? "activada" : "desactivada");
 }
 
 // --- Comandos ----------------------------------------------------------
@@ -390,7 +425,6 @@ bool EditorApp::doRename(InstanceId id, const std::string& newName) {
     if (const Instance* renamed = world_.find(id)) {
         place_.showObject(*renamed); // campo al dia
     }
-    code_.refreshProperties(); // "Asociado a" en CODE
     SK_INFO("Part renombrado: %s -> %s", oldName.c_str(), finalName.c_str());
     return true;
 }

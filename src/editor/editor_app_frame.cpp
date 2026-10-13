@@ -114,7 +114,7 @@ bool EditorApp::frame(const InputState& in) {
     // Teclas 1-4: cambiar de herramienta (solo con la ventana enfocada, en
     // PLACE, sin escribir en un campo de texto y sin un arrastre en curso).
     const bool toolKeysOk = in.active() && !in.textFocus() &&
-                            workspace_.visible() && place_.visible() &&
+                            workspace_.visible() && viewportVisible() &&
                             !gizmo_.active();
     if (toolKeysOk) {
         if (shortcutPressed(in, "tool1", '1')) workspace_.setTool(0);
@@ -128,7 +128,7 @@ bool EditorApp::frame(const InputState& in) {
     // en un campo y sin un arrastre en curso).
     const bool delOk =
         in.active() && !in.textFocus() && workspace_.visible() &&
-        place_.visible() && !gizmo_.active() && !objDrag_.active();
+        viewportVisible() && !gizmo_.active() && !objDrag_.active();
     if (delOk && !selection_.empty() &&
         (in.pressed(VK_DELETE) || in.pressed(VK_BACK))) {
         performDelete(topLevelSelection());
@@ -154,7 +154,7 @@ bool EditorApp::frame(const InputState& in) {
     const int tool = workspace_.tool();
     const Instance* primaryObj = world_.find(primary_);
     ctx.tool = tool;
-    ctx.gizmoReady = place_.visible() && workspace_.visible() && tool >= 1 &&
+    ctx.gizmoReady = viewportVisible() && workspace_.visible() && tool >= 1 &&
                      primaryObj;
     ctx.gizmoOrigin = primaryObj ? primaryObj->position() : Vec3{};
     float gizmoScaleMax = 1.0f;
@@ -239,7 +239,7 @@ void EditorApp::frameShortcuts(const FrameCtx& ctx) {
     // --- Portapapeles y rotacion (Ctrl+C/X/V/D/R/T) ---
     {
         const bool ok = in.active() && !in.textFocus() &&
-                        workspace_.visible() && place_.visible() &&
+                        workspace_.visible() && viewportVisible() &&
                         !gizmo_.active() && !objDrag_.active();
 
         // Copiar (Ctrl+C): los subarboles seleccionados al portapapeles.
@@ -356,7 +356,7 @@ void EditorApp::frameShortcuts(const FrameCtx& ctx) {
     // bloquear/anclar ---
     {
         const bool keysOk = in.active() && !in.textFocus() &&
-                            workspace_.visible() && place_.visible() &&
+                            workspace_.visible() && viewportVisible() &&
                             !gizmo_.active() && !objDrag_.active();
         if (!keysOk) return;
 
@@ -399,9 +399,10 @@ void EditorApp::frameShortcuts(const FrameCtx& ctx) {
             const Instance* object = world_.find(primary_);
             const std::string className =
                 object ? object->className() : std::string("Part");
-            place_.setVisible(false);
+            place_.setVisible(true);
             code_.setVisible(false);
             docs_.setVisible(true);
+            docs_.resize(window_.framebufferWidth(), window_.framebufferHeight());
             docs_.showClass(className);
             workspace_.setDocsActive(true);
             SK_INFO("Referencia de clases: %s", className.c_str());

@@ -30,23 +30,30 @@ void EditorApp::wireUi() {
         place_.appendOutput(static_cast<int>(level), message);
     });
 
-    // Solo la division PLACE muestra Explorer/Properties y solo CODE
-    // muestra el organizador de scripts; GUI vendra despues.
+    // Los paneles laterales (Explorer + Properties/Output) son unicos y
+    // estan visibles en todas las divisiones; solo cambia el area central:
+    // CODE muestra el editor de scripts, GUI y PLACE dejan el viewport 3D.
     workspace_.setOnTabChanged([this](int tab) {
         docs_.setVisible(false);
         workspace_.setDocsActive(false);
-        place_.setVisible(tab == 0);
+        place_.setVisible(true);
         code_.setVisible(tab == 1);
     });
 
-    // Boton "libro" de la navbar: muestra la documentacion de clases en
-    // lugar del viewport 3D (oculta PLACE/CODE).
+    // Boton "libro" de la navbar: muestra la Referencia de clases en el
+    // area central (los paneles laterales siguen visibles).
     workspace_.setOnDocs([this]() {
-        place_.setVisible(false);
+        place_.setVisible(true);
         code_.setVisible(false);
         docs_.setVisible(true);
+        docs_.resize(window_.framebufferWidth(), window_.framebufferHeight());
         workspace_.setDocsActive(true);
     });
+
+    // Menu "Vista" de la navbar: opciones de visualizacion (rejilla,
+    // sombras, wireframe, estadisticas).
+    workspace_.setOnViewOption(
+        [this](int id, bool on) { setViewOption(id, on); });
 
     // Atajo "Part": anade el objeto al World bajo el Workspace y refresca
     // el Explorer (insertar lo selecciona, lo que refresca Properties).
@@ -139,6 +146,19 @@ void EditorApp::wireUi() {
         onDeleteRequested(ids);
     });
 
+    // Arbol de scripts en disco (nodos sinteticos del Explorer bajo la
+    // rama Scripts): crear/renombrar/borrar y seleccionar.
+    place_.setOnScriptCreate(
+        [this](const std::string& rel) { onScriptCreate(rel); });
+    place_.setOnScriptRename(
+        [this](const std::string& rel, const std::string& name) {
+            onScriptRename(rel, name);
+        });
+    place_.setOnScriptDelete(
+        [this](const std::string& rel) { onScriptDelete(rel); });
+    place_.setOnScriptSelected(
+        [this](const std::string& rel) { onScriptSelected(rel); });
+
     // Tira de dimensiones: seleccionar la activa, crear, cerrar (con
     // confirmacion) y renombrar. Todo pasa por comandos con undo+guardado.
     dimsBar_.setOnSelected([this](InstanceId id) { setActiveDimension(id); });
@@ -147,55 +167,6 @@ void EditorApp::wireUi() {
         [this](InstanceId id) { onCloseDimension(id); });
     dimsBar_.setOnRenamed([this](InstanceId id, const std::string& n) {
         onRenameDimension(id, n);
-    });
-
-    // CODE: el panel Properties consulta el objeto asociado a un script.
-    code_.setOnQueryAssoc([this](const std::string& rel) -> std::string {
-        for (InstanceId id : allInstances()) {
-            const Instance* o = world_.find(id);
-            if (!o || !o->hasAttribute("Script")) continue;
-            if (o->getAttribute("Script").value == rel) return o->name();
-        }
-        return "";
-    });
-
-    // Borrar un script (o una carpeta con sus hijos) limpia las
-    // asociaciones de la escena que apuntaban a esa rel.
-    code_.setOnScriptRemoved([this](const std::string& rel) {
-        bool changed = false;
-        for (InstanceId id : allInstances()) {
-            Instance* o = world_.find(id);
-            if (!o || !o->hasAttribute("Script")) continue;
-            const std::string value = o->getAttribute("Script").value;
-            if (value == rel || value.rfind(rel + "/", 0) == 0) {
-                o->removeAttribute("Script");
-                changed = true;
-            }
-        }
-        if (changed) saveScene();
-    });
-
-    // Renombrar (archivo o carpeta) reescribe las rels afectadas.
-    code_.setOnScriptRenamed([this](const std::string& oldRel,
-                                    const std::string& newRel) {
-        bool changed = false;
-        for (InstanceId id : allInstances()) {
-            Instance* o = world_.find(id);
-            if (!o || !o->hasAttribute("Script")) continue;
-            const std::string value = o->getAttribute("Script").value;
-            if (value == oldRel) {
-                Attribute a = o->getAttribute("Script");
-                a.value = newRel;
-                o->setAttribute(a);
-                changed = true;
-            } else if (value.rfind(oldRel + "/", 0) == 0) {
-                Attribute a = o->getAttribute("Script");
-                a.value = newRel + value.substr(oldRel.size());
-                o->setAttribute(a);
-                changed = true;
-            }
-        }
-        if (changed) saveScene();
     });
 }
 
@@ -409,6 +380,106 @@ void EditorApp::onReparent(InstanceId child, InstanceId parent, int index) {
     SK_INFO("Explorer: %s %s %s", worldName(child).c_str(),
             sameParent ? "reordenado bajo" : "cuelga de",
             worldName(parent).c_str());
+}
+
+// Arbol de scripts en disco: crear un script nuevo dentro de una carpeta.
+void EditorApp::onScriptCreate(const std::string& parentRel) {
+    if (active_.folder.empty()) return;
+    std::string name = "NuevoScript";
+    for (int i = 2; i < 1000; ++i) {
+        bool clash = false;
+        for (const scripts::Node& n : scripts::list(active_, parentRel)) {
+            if (n.name == name + ".sk") {
+                clash = true;
+                break;
+            }
+        }
+        if (!clash) break;
+        name = "NuevoScript" + std::to_string(i);
+    }
+    if (!scripts::createScript(active_, parentRel, name)) {
+        SK_WARN("No se pudo crear el script en %s", parentRel.c_str());
+        return;
+    }
+    place_.refreshScripts();
+    place_.appendOutput(0, "Script creado: " + parentRel + "/" + name + ".sk");
+}
+
+// Renombrar un nodo de script en disco y reescribir las asociaciones de
+// la escena que lo referenciaban.
+void EditorApp::onScriptRename(const std::string& rel,
+                               const std::string& newName) {
+    if (active_.folder.empty() || rel.empty() || newName.empty()) return;
+    if (scripts::isProtected(rel)) return;
+    const bool isFile =
+        rel.size() >= 3 && rel.compare(rel.size() - 3, 3, ".sk") == 0;
+    const size_t slash = rel.find_last_of('/');
+    const std::string parentRel =
+        (slash == std::string::npos) ? std::string() : rel.substr(0, slash);
+    if (!scripts::renameNode(active_, rel, newName)) {
+        SK_WARN("No se pudo renombrar %s", rel.c_str());
+        return;
+    }
+    std::string base = newName;
+    if (isFile && base.size() >= 3 &&
+        base.compare(base.size() - 3, 3, ".sk") == 0) {
+        base = base.substr(0, base.size() - 3);
+    }
+    const std::string newRel =
+        parentRel.empty() ? (base + (isFile ? ".sk" : ""))
+                          : (parentRel + "/" + base + (isFile ? ".sk" : ""));
+    if (newRel != rel) {
+        bool changed = false;
+        for (InstanceId id : allInstances()) {
+            Instance* o = world_.find(id);
+            if (!o || !o->hasAttribute("Script")) continue;
+            const std::string value = o->getAttribute("Script").value;
+            if (value == rel) {
+                Attribute a = o->getAttribute("Script");
+                a.value = newRel;
+                o->setAttribute(a);
+                changed = true;
+            } else if (value.rfind(rel + "/", 0) == 0) {
+                Attribute a = o->getAttribute("Script");
+                a.value = newRel + value.substr(rel.size());
+                o->setAttribute(a);
+                changed = true;
+            }
+        }
+        if (changed) saveScene();
+    }
+    place_.refreshScripts();
+    SK_INFO("Script renombrado: %s -> %s", rel.c_str(), newRel.c_str());
+}
+
+// Borrar un nodo de script (o carpeta) y limpiar las asociaciones que
+// apuntaban a el.
+void EditorApp::onScriptDelete(const std::string& rel) {
+    if (active_.folder.empty() || rel.empty()) return;
+    if (scripts::isProtected(rel)) return;
+    if (!scripts::removeNode(active_, rel)) {
+        SK_WARN("No se pudo borrar %s", rel.c_str());
+        return;
+    }
+    bool changed = false;
+    for (InstanceId id : allInstances()) {
+        Instance* o = world_.find(id);
+        if (!o || !o->hasAttribute("Script")) continue;
+        const std::string value = o->getAttribute("Script").value;
+        if (value == rel || value.rfind(rel + "/", 0) == 0) {
+            o->removeAttribute("Script");
+            changed = true;
+        }
+    }
+    if (changed) saveScene();
+    place_.refreshScripts();
+    place_.appendOutput(0, "Script borrado: " + rel);
+}
+
+void EditorApp::onScriptSelected(const std::string& rel) {
+    // Seleccionar un script limpia la seleccion de escena (el Explorer ya
+    // avisa con kInvalidId); las Properties del script llegan despues.
+    SK_INFO("Script seleccionado: %s", rel.c_str());
 }
 
 // Properties: entrada unica para toda fila editable. El panel entrega el

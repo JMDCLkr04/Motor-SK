@@ -57,6 +57,35 @@ la ventana, `contentTop()` es el borde inferior de la tira de dimensiones
 (donde empiezan paneles y viewport) e `inViewport(x, y)` da el test de
 picking/marquee. Es lógica pura, sin `windows.h`, y entra en `motorsk_model`.
 
+La fila de pestañas (`WorkspaceTabs`) mide **24 px** (`kNavbarHeight`): sus
+filas (título + pestañas PLACE/CODE/GUI + botón **Vista**) alimentan
+`kTopBandHeight`, y hay tests que comprueban tanto la altura de fila como que
+la suma de bandas cuadra con el alto de la ventana.
+
+### Marco compartido (`PLACE | CODE | GUI`)
+
+Las tres divisiones comparten el **mismo marco**: los paneles laterales
+(Explorer a la derecha, Properties/Output a la izquierda) son **únicos**,
+creados una sola vez por `PlaceView` y visibles en las tres. Cambiar de
+pestaña **no recrea controles** ni parpadea (`--gdi-check` lo vigila); solo
+cambia el **área central**:
+
+- PLACE: viewport 3D (con `PlaceView` visible).
+- CODE: panel central de código (`ui/code_view.*`, clase `MotorSKCodePanel`).
+  De momento muestra la cabecera "Código" y el aviso "Editor de código:
+  próximamente"; el editor multilínea llega en un paso posterior.
+- GUI: por definir.
+
+`EditorApp::viewportVisible()` centraliza la decisión de "¿hay viewport 3D?"
+(`view3d_ && !code_.visible() && !docs_.visible()`): el picking, los atajos de
+encuadre y el `logProjection_` la consultan en lugar de mirar cada panel.
+
+El botón **Vista** de la pestañera abre un menú emergente (`WorkspaceTabs`)
+con **Rejilla / Sombras / Wireframe / Estadísticas**; emite
+`onViewOption(id, on)` y `EditorApp::setViewOption` lo aplica (la rejilla ya
+se respeta en `renderer.drawFrame(..., showGrid)`; sombras y wireframe quedan
+pendientes del renderer).
+
 ## Tira de dimensiones (`src/ui/dimensions_bar.*`)
 
 Bajo la barra superior, a ancho completo y sobre los paneles, vive la **tira
@@ -104,6 +133,31 @@ de escena usan exactamente el mismo formato. Añadir una propiedad a una clase
 del registro basta para que aparezca en Properties, en la Referencia de clases
 (`docs_view`, que también lee `ClassRegistry`) y en el archivo de escena
 (`World` serializa iterando `valueCount`/`valueProp`).
+
+## Scripts en el Explorer (`src/ui/place_view.cpp`, `src/project/scripts.*`)
+
+El Explorer compartido muestra los scripts del proyecto como un árbol de
+disco. `PlaceView` implementa la interfaz `ui::ScriptsTree` con
+`DiskScriptsTree`, una vista del sistema de archivos apoyada en
+`scripts::list` (nodos `scripts::Node` con `rel/name/isDir`). Los nodos de
+disco se distinguen del `World` por su id (`>= ui::kScriptNodeBase`) y viven
+bajo la rama global `Scripts` (las cuatro raíces Server/Shared/Player/
+Character). `PlaceView::setProject` (llamado por `EditorApp::openProject`)
+fija el proyecto y reconstruye ese árbol; `refreshScripts()` lo relee tras
+cada cambio.
+
+Las operaciones salen por callbacks de `EditorApp` (`onScriptCreate`,
+`onScriptRename`, `onScriptDelete`, `onScriptSelected`):
+
+- **Crear**: nombre por defecto único (`NuevoScript`, `NuevoScript2`, …) y
+  `scripts::createScript`.
+- **Renombrar / borrar**: se aplican en disco (`scripts::renameNode` /
+  `scripts::removeNode`) y **se reescriben las asociaciones** de la escena:
+  los `Attribute` `"Script"` de los nodos que apuntaban a la ruta afectada se
+  actualizan o se eliminan (y la escena se guarda). Los nodos protegidos
+  (`scripts::isProtected`) no se tocan.
+- **Seleccionar**: limpia la selección de escena; las Properties de un script
+  llegarán en un paso posterior.
 
 ## Input por eventos (`src/platform/input_state.*`)
 
@@ -244,8 +298,9 @@ aplicación se cierra a mitad de escritura.
 ## Kit de widgets (`ui/kit/`)
 
 Controles de GDI propios para sustituir gradualmente los nativos
-(TreeView/ListView de comctl32) y garantizar el mismo tema oscuro en toda la
-UI:
+(ListView de comctl32) y garantizar el mismo tema oscuro en toda la UI (el
+`TreeView` nativo ya no se usa en ninguna parte: el antiguo árbol de scripts
+del panel CODE murió al pasar los scripts al Explorer compartido):
 
 - `paint_buffer` (backing store + doble buffer para parpadeo cero),
   `theme.h` (tokens de color/medida), `icon_atlas` + `icons.h`
@@ -265,7 +320,14 @@ controles nativos se portarán de forma incremental.
 `motorsk_model`): lee el `World` por id (no copia texto), aplana en preorden
 con pila explícita (aguanta 200+ niveles), guarda el conjunto de expandidos
 por id y resuelve `dropTarget(origen, destino, zona)` (ciclo, protegido, él
-mismo, inexistente). Se prueba en `tests/test_model.cpp`.
+mismo, inexistente). Se prueba en `tests/test_model.cpp`. 
+
+Además del `World`, el árbol puede mostrar una segunda fuente de nodos
+sintéticos a través de la interfaz `ui::ScriptsTree` (`setScriptsTree`): los
+nodos con id `>= kScriptNodeBase` los resuelve esa fuente. Así el Explorer
+lista los **scripts en disco** (bajo la rama global `Scripts`, en subcarpetas
+Server/Shared/Player/Character) como una vista del sistema de archivos, sin
+que `tree_model` dependa de `windows.h` ni del proyecto.
 
 ## Cómo probar
 
@@ -299,7 +361,12 @@ build\Release\MotorSK.exe --frames 30 > log.txt 2>&1
 build\Release\MotorSK.exe --stats   # cada 5 s: frames y media del frame
 build\Release\MotorSK.exe --proyecto <ruta> --play
 build\Release\MotorSK.exe --ui-demo  # abre la demostración del kit de UI
+build\Release\MotorSK.exe --gdi-check # PASS si cambiar de vista no recrea controles
 ```
+
+Con `--debug`, al abrir un proyecto se registra cuántos scripts en disco ve el
+Explorer (`Explorer: N scripts en disco bajo <ruta>`), útil para comprobar el
+árbol de scripts sin depender de capturas.
 
 Build con sanitizadores (AddressSanitizer del MSVC) para detectar errores de
 memoria en el modelo; se construye en `build-asan` (runtime dinámico, sin

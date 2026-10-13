@@ -970,7 +970,7 @@ bool Renderer::drawFrame(const Mat4& viewProj, const std::vector<Mat4>& objects,
                          const std::vector<Mat4>& outlines,
                          const ScreenRect& marquee,
                          const std::vector<LineVertex>& gizmo,
-                         bool gizmoChanged) {
+                         bool gizmoChanged, bool showGrid) {
     if (swapchainDirty_ && !recreateSwapchain()) return false;
     if (swapchain_ == VK_NULL_HANDLE) return true; // ventana minimizada
 
@@ -1045,7 +1045,9 @@ bool Renderer::drawFrame(const Mat4& viewProj, const std::vector<Mat4>& objects,
 
     vkCmdPushConstants(command, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
                        0, sizeof(float) * 16, &viewProj);
-    vkCmdDraw(command, gridVertexCount_, 1, 0, 0);
+    if (showGrid) {
+        vkCmdDraw(command, gridVertexCount_, 1, 0, 0);
+    }
 
     // Objetos "Part": mismo shader y push constant, pero la matriz ya
     // viene multiplicada (viewProj * model) y el pipeline es de

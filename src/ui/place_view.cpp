@@ -4,10 +4,14 @@
 #include <commctrl.h>
 
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "../core/log.h"
 #include "../editor/layout.h"
+#include "../project/project.h"
+#include "../project/scripts.h"
 #include "class_picker.h"
 #include "theme.h"
 
@@ -18,6 +22,119 @@ namespace {
 const char* kPanelClass = "MotorSKPlacePanel";
 
 constexpr int kHeaderHeight = 36;
+
+// Arbol de scripts en disco para el Explorer (nodos sinteticos bajo las
+// cuatro raices del nodo Scripts). Mantiene un mapa estable id<->rel para
+// que el estado de expansion sobreviva a los repintados; solo consulta el
+// disco al aplanar/expandir, nunca por frame.
+class DiskScriptsTree : public ui::ScriptsTree {
+public:
+    DiskScriptsTree(const Project* project, const World* world)
+        : project_(project), world_(world) {}
+
+    bool belongs(ui::NodeId id) const override {
+        if (id >= ui::kScriptNodeBase) return idToRel_.count(id) != 0;
+        return isRootInstance(id);
+    }
+
+    std::vector<ui::NodeId> childrenOf(ui::NodeId id) const override {
+        std::vector<ui::NodeId> out;
+        const std::string rel = relOf(id);
+        if (rel.empty() || !project_) return out;
+        // Solo las raices del World y las carpetas de disco tienen hijos.
+        const bool isFolder =
+            (id < ui::kScriptNodeBase) || (isDirNodes_.count(id) != 0);
+        if (!isFolder) return out;
+        for (const scripts::Node& n : scripts::list(*project_, rel)) {
+            out.push_back(idForRel(n.rel, n.isDir));
+        }
+        return out;
+    }
+
+    ui::NodeId parentOf(ui::NodeId id) const override {
+        if (!belongs(id)) return kInvalidId;
+        const std::string rel = relOf(id);
+        const size_t slash = rel.find_last_of('/');
+        if (slash == std::string::npos) {
+            return world_ ? world_->globalScripts() : kInvalidId;
+        }
+        const std::string parentRel = rel.substr(0, slash);
+        const ui::NodeId rootId = rootInstanceId(parentRel);
+        if (rootId != kInvalidId) return rootId;
+        return idForRel(parentRel, true);
+    }
+
+    std::string nameOf(ui::NodeId id) const override {
+        return leafName(relOf(id));
+    }
+
+    bool isDir(ui::NodeId id) const override {
+        return isDirNodes_.count(id) != 0;
+    }
+
+    // rel de un nodo del arbol (para las operaciones de fichero del dueno).
+    std::string relOfNode(ui::NodeId id) const { return relOf(id); }
+
+private:
+    int rootIndex(const std::string& name) const {
+        for (int i = 0; i < scripts::kRootCount; ++i) {
+            if (name == scripts::kRoots[i]) return i;
+        }
+        return -1;
+    }
+
+    bool isRootInstance(ui::NodeId id) const {
+        if (!world_) return false;
+        const Instance* inst = world_->find(id);
+        if (!inst || inst->parentId() != world_->globalScripts()) return false;
+        return rootIndex(inst->name()) >= 0;
+    }
+
+    ui::NodeId rootInstanceId(const std::string& rel) const {
+        if (!world_ || rootIndex(rel) < 0) return kInvalidId;
+        const Instance* scriptsRoot = world_->find(world_->globalScripts());
+        if (!scriptsRoot) return kInvalidId;
+        for (InstanceId child : scriptsRoot->children()) {
+            const Instance* inst = world_->find(child);
+            if (inst && inst->name() == rel) return child;
+        }
+        return kInvalidId;
+    }
+
+    std::string relOf(ui::NodeId id) const {
+        if (id >= ui::kScriptNodeBase) {
+            const auto it = idToRel_.find(id);
+            return it == idToRel_.end() ? std::string() : it->second;
+        }
+        const Instance* inst = world_ ? world_->find(id) : nullptr;
+        return inst ? inst->name() : std::string();
+    }
+
+    static std::string leafName(const std::string& rel) {
+        const size_t slash = rel.find_last_of('/');
+        return slash == std::string::npos ? rel : rel.substr(slash + 1);
+    }
+
+    ui::NodeId idForRel(const std::string& rel, bool isDir) const {
+        const auto it = relToId_.find(rel);
+        if (it != relToId_.end()) {
+            if (isDir) isDirNodes_.insert(it->second);
+            return it->second;
+        }
+        const ui::NodeId id = nextId_++;
+        relToId_[rel] = id;
+        idToRel_[id] = rel;
+        if (isDir) isDirNodes_.insert(id);
+        return id;
+    }
+
+    const Project* project_ = nullptr;
+    const World* world_ = nullptr;
+    mutable ui::NodeId nextId_ = ui::kScriptNodeBase;
+    mutable std::unordered_map<ui::NodeId, std::string> idToRel_;
+    mutable std::unordered_map<std::string, ui::NodeId> relToId_;
+    mutable std::unordered_set<ui::NodeId> isDirNodes_;
+};
 
 // Rectangulo de la pestana "index" de "count" repartidas en el ancho.
 RECT tabRect(const RECT& rc, int index, int count) {
@@ -111,25 +228,53 @@ bool PlaceView::create(void* parentHwnd) {
     treeWidget_.setOnSelectionChanged(
         [this](const std::vector<ui::NodeId>&) { notifySelection(); });
     treeWidget_.setOnAddRequested([this](ui::NodeId id, const RECT& anchor) {
+        if (id >= ui::kScriptNodeBase) {
+            if (onScriptCreate_ && scriptsTree_) {
+                onScriptCreate_(
+                    static_cast<DiskScriptsTree*>(scriptsTree_.get())
+                        ->relOfNode(id));
+            }
+            return;
+        }
         POINT pt{anchor.left, anchor.bottom};
         openClassPicker(static_cast<InstanceId>(id), pt);
     });
     treeWidget_.setOnRenameRequested([this](ui::NodeId id,
                                             const std::string& name) {
+        if (id >= ui::kScriptNodeBase) {
+            if (onScriptRename_ && scriptsTree_) {
+                onScriptRename_(
+                    static_cast<DiskScriptsTree*>(scriptsTree_.get())
+                        ->relOfNode(id),
+                    name);
+            }
+            return;
+        }
         if (onNameEdited_) onNameEdited_(static_cast<InstanceId>(id), name);
     });
     treeWidget_.setOnDeleteRequested(
         [this](const std::vector<ui::NodeId>& ids) {
-            if (!onDelete_) return;
-            std::vector<InstanceId> out;
-            out.reserve(ids.size());
+            std::vector<InstanceId> scene;
+            scene.reserve(ids.size());
             for (ui::NodeId n : ids) {
-                out.push_back(static_cast<InstanceId>(n));
+                if (n >= ui::kScriptNodeBase) {
+                    if (onScriptDelete_ && scriptsTree_) {
+                        onScriptDelete_(
+                            static_cast<DiskScriptsTree*>(scriptsTree_.get())
+                                ->relOfNode(n));
+                    }
+                } else {
+                    scene.push_back(static_cast<InstanceId>(n));
+                }
             }
-            onDelete_(out);
+            if (!scene.empty() && onDelete_) onDelete_(scene);
         });
     treeWidget_.setOnReparentRequested(
         [this](ui::NodeId child, ui::NodeId parent, int index) {
+            // Los nodos de scripts no se reubican por arrastre.
+            if (child >= ui::kScriptNodeBase || parent >= ui::kScriptNodeBase) {
+                return;
+            }
             if (onReparent_) {
                 onReparent_(static_cast<InstanceId>(child),
                             static_cast<InstanceId>(parent), index);
@@ -196,6 +341,7 @@ void PlaceView::setWorld(World* world) {
     worldEvents_ = world;
     propsPanel_.setWorld(world);
     treeModel_.setWorld(world);
+    rebuildScriptsTree();  // el proveedor necesita el World del Scripts global
     treeModel_.expandAll();
     if (treeWidget_.hwnd()) treeWidget_.refresh();
     if (!world) return;
@@ -222,6 +368,34 @@ void PlaceView::setVisible(bool visible) {
     visible_ = visible;
     if (explorer_) ShowWindow(static_cast<HWND>(explorer_), visible ? SW_SHOW : SW_HIDE);
     if (properties_) ShowWindow(static_cast<HWND>(properties_), visible ? SW_SHOW : SW_HIDE);
+}
+
+void PlaceView::setProject(const Project* project) {
+    project_ = project;
+    rebuildScriptsTree();
+    treeModel_.expandAll();
+    if (treeWidget_.hwnd()) treeWidget_.refresh();
+    if (project_) {
+        const auto rels = scripts::allScriptRels(*project_);
+        SK_DEBUG("Explorer: %d scripts en disco bajo %s",
+                 static_cast<int>(rels.size()),
+                 scripts::rootFolder(*project_).c_str());
+    }
+}
+
+void PlaceView::rebuildScriptsTree() {
+    if (project_) {
+        scriptsTree_ = std::make_unique<DiskScriptsTree>(project_, world_);
+        treeModel_.setScriptsTree(scriptsTree_.get());
+    } else {
+        scriptsTree_.reset();
+        treeModel_.setScriptsTree(nullptr);
+    }
+}
+
+void PlaceView::refreshScripts() {
+    treeModel_.invalidate();
+    if (treeWidget_.hwnd()) treeWidget_.refresh();
 }
 
 void PlaceView::resize(int width, int height) {
@@ -286,8 +460,18 @@ void PlaceView::syncTreeSelection(InstanceId primary) {
 
 void PlaceView::notifySelection() {
     if (suppressNotify_) return;
-    if (!onSelectionChanged_) return;
     const ui::NodeId p = treeWidget_.primary();
+    // Un script (nodo de disco): no hay objeto de escena, pero se avisa al
+    // dueno y se limpia la seleccion de escena.
+    if (p >= ui::kScriptNodeBase) {
+        if (onScriptSelected_ && scriptsTree_) {
+            onScriptSelected_(static_cast<DiskScriptsTree*>(scriptsTree_.get())
+                                  ->relOfNode(p));
+        }
+        if (onSelectionChanged_) onSelectionChanged_(kInvalidId);
+        return;
+    }
+    if (!onSelectionChanged_) return;
     InstanceId id = kInvalidId;
     if (p != 0 && p != ui::kTreeRootId && p != ui::kDimGroupId && world_ &&
         world_->exists(static_cast<InstanceId>(p))) {

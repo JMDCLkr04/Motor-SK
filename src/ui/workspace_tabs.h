@@ -18,6 +18,17 @@ enum FileMenuId {
     kFileExit = 9,
 };
 
+// Opciones de vista (menu "Vista" de la navbar). El valor booleano indica
+// activado; el dueno decide como se aplican (la rejilla la pinta el
+// renderer; sombras/wireframe esperan soporte del renderer).
+enum ViewOptionId {
+    kViewGrid = 0,
+    kViewShadows = 1,
+    kViewWireframe = 2,
+    kViewStats = 3,
+    kViewOptionCount = 4,
+};
+
 // Barra superior de la vista 3D, en tres filas dentro de la misma ventana
 // hija:
 //  - fila de menus (arriba): el boton "Archivo" con su desplegable.
@@ -33,9 +44,12 @@ public:
     // Fila de menus: boton "Archivo" a la izquierda.
     static constexpr int kMenuBarHeight = 30;
     // Fila de atajos: tarjetas compactas de 56x52 con el icono arriba y
-    // el nombre abajo; la navbar ocupa el resto (banda total de 116px).
+    // el nombre abajo; la navbar (pestanas PLACE/CODE/GUI + boton libro)
+    // ocupa 24px (banda total de 108px). Esta es la unica constante que
+    // hay que tocar para cambiar el alto de la fila: Layout deriva de
+    // aqui su kTopBandHeight.
     static constexpr int kShortcutHeight = 54;
-    static constexpr int kNavbarHeight = 32;
+    static constexpr int kNavbarHeight = 24;
     // Alto total de la banda (los paneles PLACE/CODE empiezan aqui). La
     // cifra la expone editor::Layout, que es la fuente unica de la
     // disposicion; aqui solo interesa para recortar los controles.
@@ -65,6 +79,16 @@ public:
     void setOnDocs(std::function<void()> cb) { onDocs_ = std::move(cb); }
     void setDocsActive(bool active);
     bool docsActive() const { return docsActive_; }
+
+    // Menu "Vista" de la navbar (tras un separador vertical): opciones de
+    // visualizacion. Se notifica con el id y su nuevo estado.
+    void setOnViewOption(std::function<void(int, bool)> cb) {
+        onViewOption_ = std::move(cb);
+    }
+    bool viewOption(int index) const {
+        return (index >= 0 && index < kViewOptionCount) ? viewOptions_[index]
+                                                         : false;
+    }
 
     // Atajo "Part": anade un objeto 3D a la escena con una forma
     // determinada (0 = cubo). El boton Part llama a cb(0), el menu de
@@ -115,11 +139,15 @@ private:
                                          unsigned long long wParam, long long lParam);
     static long long __stdcall filePopupProc(void* hwnd, unsigned int msg,
                                              unsigned long long wParam, long long lParam);
+    static long long __stdcall viewPopupProc(void* hwnd, unsigned int msg,
+                                             unsigned long long wParam, long long lParam);
     void selectTab(int index);
     void setPartShape(int shape);
     void updatePartLabel();
     void showShapeMenu(bool show);
     void showFileMenu(bool show);
+    void showViewMenu(bool show);
+    void toggleViewOption(int index);
     void commitMoveField();
     void commitRotField();
 
@@ -141,6 +169,12 @@ private:
     static constexpr int kIdDocsButton = 159;
     static constexpr int kDocsButtonX = 10;
     static constexpr int kDocsButtonSize = 24;
+
+    // Menu "Vista" (navbar): un separador vertical y un boton con su
+    // desplegable de opciones.
+    static constexpr int kIdViewDivider = 164;
+    static constexpr int kIdView = 165;
+    static constexpr int kIdViewBase = 400;
 
     // Boton "Archivo" de la fila de menus y su desplegable.
     static constexpr int kIdFile = 150;
@@ -177,6 +211,10 @@ private:
     void* fileMenu_ = nullptr;         // desplegable del menu Archivo
     void* fileButtons_[kFileCount] = {};
     void* docsBtn_ = nullptr;          // boton "libro" de la navbar
+    void* viewDivider_ = nullptr;      // rallita antes del boton Vista
+    void* viewButton_ = nullptr;       // boton "Vista" de la navbar
+    void* viewMenu_ = nullptr;         // desplegable de opciones de vista
+    void* viewButtons_[kViewOptionCount] = {};
     void* playButton_ = nullptr;       // botones de ejecucion de la fila de menus
     void* runButton_ = nullptr;
     void* stopButton_ = nullptr;
@@ -187,6 +225,8 @@ private:
     int rotateStep_ = 15;     // paso de rotacion en grados
     bool menuOpen_ = false;
     bool fileMenuOpen_ = false;
+    bool viewMenuOpen_ = false;
+    bool viewOptions_[kViewOptionCount] = {true, false, false, false};
     bool visible_ = false;
     bool docsActive_ = false;
     bool running_ = false;
@@ -195,6 +235,7 @@ private:
     std::function<void(int)> onToolChanged_;
     std::function<void(int)> onFileCommand_;
     std::function<void()> onDocs_;
+    std::function<void(int, bool)> onViewOption_;
     std::function<void()> onPlay_;
     std::function<void()> onRun_;
     std::function<void()> onStop_;

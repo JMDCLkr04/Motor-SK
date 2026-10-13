@@ -837,6 +837,13 @@ void checkLayout(int w, int h) {
     CHECK(l.viewport.x == l.leftPanel.right());
     CHECK(l.rightPanel.right() == w);
 
+    // Suma de alturas: banda superior + tira de dimensiones + paneles es
+    // exactamente el alto de la ventana (la fila de navbar de 24px queda
+    // incluida en kTopBandHeight).
+    if (h >= Layout::kTopBandHeight + Layout::kDimensionBarHeight) {
+        CHECK(l.topBar.h + l.dimensionBar.h + l.leftPanel.h == h);
+    }
+
     // inViewport coincide con los limites del viewport.
     if (l.viewport.w > 0 && l.viewport.h > 0) {
         CHECK(l.inViewport(l.viewport.x, l.viewport.y));
@@ -862,6 +869,12 @@ void testLayout() {
           1280 - Layout::kPropertiesWidth - Layout::kExplorerWidth);
     CHECK(big.viewport.h ==
           720 - Layout::kTopBandHeight - Layout::kDimensionBarHeight);
+    // La fila PLACE/CODE/GUI mide 24px y la banda superior suma sus filas.
+    int navbarH = sk::WorkspaceTabs::kNavbarHeight;
+    int bandSum = sk::WorkspaceTabs::kMenuBarHeight +
+                  sk::WorkspaceTabs::kShortcutHeight + navbarH;
+    CHECK(navbarH == 24);
+    CHECK(Layout::kTopBandHeight == bandSum);
     std::printf("  banda=%d tira=%d props=%d explorer=%d viewport=%dx%d\n",
                 Layout::kTopBandHeight, Layout::kDimensionBarHeight,
                 big.leftPanel.w, big.rightPanel.w, big.viewport.w,

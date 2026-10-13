@@ -21,6 +21,28 @@ namespace ui {
 // fuera del rango de ids de Instance (1..N) para no colisionar.
 inline constexpr NodeId kTreeRootId = 0xFFFFFFFFu;  // raiz virtual (no se pinta)
 inline constexpr NodeId kDimGroupId = 0xFFFFFFFEu;  // grupo "Dimensions"
+// Base del rango de ids de los nodos de scripts en disco (ficheros y
+// carpetas del arbol global Scripts). Bien por encima del rango de
+// InstanceId (1..N) y por debajo de los dos sinteticos de arriba.
+inline constexpr NodeId kScriptNodeBase = 0x00100000u;
+
+// Proveedor del arbol de scripts en disco. Lo implementa el exe (conoce el
+// Project y scripts::); el modelo solo lo consulta al aplanar/expandir,
+// nunca por frame. Todos los metodos son const.
+class ScriptsTree {
+public:
+    virtual ~ScriptsTree() = default;
+    // Pertenece al arbol de scripts: una de las cuatro raices del World o
+    // un nodo sintetico de disco.
+    virtual bool belongs(NodeId id) const = 0;
+    // Hijos (nodos de disco) de un nodo del arbol; vacio si no lo es.
+    virtual std::vector<NodeId> childrenOf(NodeId id) const = 0;
+    // Padre de un nodo sintetico (una raiz del World o otra carpeta).
+    virtual NodeId parentOf(NodeId id) const = 0;
+    // Solo para nodos sinteticos (los del World los lee el modelo).
+    virtual std::string nameOf(NodeId id) const = 0;
+    virtual bool isDir(NodeId id) const = 0;
+};
 
 // Fila visible del arbol. Identifica el nodo por id (el texto se lee del
 // World con textOf) y guarda lo minimo para pintar: nivel, icono y
@@ -59,6 +81,16 @@ public:
 
     void setWorld(const World* world);
     const World* world() const { return world_; }
+
+    // Fija (o quita con nullptr) el proveedor del arbol de scripts en
+    // disco que se muestra bajo las raices del nodo Scripts.
+    void setScriptsTree(const ScriptsTree* scripts) {
+        scripts_ = scripts;
+        dirty_ = true;
+    }
+    bool isScriptNode(NodeId id) const {
+        return id >= kScriptNodeBase && scripts_ && scripts_->belongs(id);
+    }
 
     void invalidate() { dirty_ = true; }
     void expandAll();
@@ -100,6 +132,7 @@ private:
     void flatten() const;
 
     const World* world_ = nullptr;
+    const ScriptsTree* scripts_ = nullptr;
     std::unordered_set<NodeId> expanded_;
     mutable std::vector<TreeNode> rows_;
     mutable bool dirty_ = true;

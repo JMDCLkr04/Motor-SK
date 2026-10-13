@@ -94,6 +94,15 @@ private:
     std::vector<InstanceId> topLevelSelection() const;
     void applySelection(std::vector<InstanceId> ids, InstanceId newPrimary);
     bool inViewport(const Vec2& p) const;
+    // true si el area central muestra el viewport 3D (proyecto abierto y
+    // ni CODE ni la Referencia de clases activos). Los paneles laterales
+    // (PlaceView) estan siempre visibles, asi que no sirven de indicador.
+    bool viewportVisible() const;
+
+    // Aplica una opcion del menu Vista. La rejilla la pinta el renderer;
+    // sombras y wireframe quedan registradas pero el renderer aun no las
+    // soporta (se avisa por log).
+    void setViewOption(int id, bool on);
 
     // --- Comandos (delegan en EditorCommands) ---
     void performDelete(const std::vector<InstanceId>& tops);
@@ -107,7 +116,14 @@ private:
     void onInsertClass(InstanceId parentId, const std::string& className);
     void onDeleteRequested(const std::vector<InstanceId>& ids);
     void onReparent(InstanceId child, InstanceId parent, int index);
-    void onPropertyEdited(InstanceId id, const std::string& prop,
+
+    // Arbol de scripts en disco (nodos del Explorer): crear un script en
+    // una carpeta, renombrar, borrar y seleccionar. Renombrar y borrar
+    // reescriben las asociaciones ("Script") de la escena.
+    void onScriptCreate(const std::string& parentRel);
+    void onScriptRename(const std::string& rel, const std::string& newName);
+    void onScriptDelete(const std::string& rel);
+    void onScriptSelected(const std::string& rel);    void onPropertyEdited(InstanceId id, const std::string& prop,
                           const PropertyValue& value);
     void onAttributeSet(InstanceId id, const Attribute& attr);
     void onAttributeRemoved(InstanceId id, const std::string& name);
@@ -175,6 +191,9 @@ private:
     double lastSceneChange_ = 0.0;
 
     bool statsEnabled_ = false;
+    bool viewGrid_ = true;        // opcion Vista: rejilla del suelo
+    bool viewShadows_ = false;    // opcion Vista: sombras (pendiente renderer)
+    bool viewWireframe_ = false;  // opcion Vista: wireframe (pendiente renderer)
     double frameInterval_ = 0.0;
     double lastDrawWall_ = 0.0;
     double statsWindowStart_ = 0.0;

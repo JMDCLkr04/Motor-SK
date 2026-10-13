@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -16,6 +17,8 @@
 
 namespace sk {
 
+struct Project;
+
 // Paneles laterales de la division PLACE: a la izquierda el grupo
 // "Properties | Output" (widgets dibujados a mano) y a la derecha el
 // Explorer (arbol del World), sobre la vista 3D. Son tres ventanas hijas
@@ -23,8 +26,9 @@ namespace sk {
 //
 // El Explorer muestra el arbol del World: el grupo "Dimensions" con cada
 // dimension y sus objetos y el grupo "Scripts" con el arbol global de
-// scripts. Los nodos de escena guardan su InstanceId en lParam (>= 1);
-// los grupos sinteticos y las entradas de disco usan 0. Properties lee
+// scripts. Ademas, si hay proyecto, bajo las raices del nodo Scripts
+// aparecen los scripts en disco (nodos sinteticos con id >=
+// ui::kScriptNodeBase, resueltos por una ui::ScriptsTree). Properties lee
 // las propiedades de la Instance seleccionada por id.
 class PlaceView {
 public:
@@ -34,6 +38,15 @@ public:
     // Rutas base que alimentan el grupo sintetico Assets del Explorer.
     void setScriptsRoot(const std::string& path) { scriptsRoot_ = path; }
     void setAssetsRoot(const std::string& path) { assetsRoot_ = path; }
+
+    // Proyecto del arbol de scripts en disco. Con el fijado, el Explorer
+    // lista bajo cada raiz del nodo Scripts los ficheros y carpetas del
+    // proyecto. Pasar nullptr al cerrar el proyecto.
+    void setProject(const Project* project);
+
+    // Reconstruye la parte de scripts del arbol (tras crear/renombrar/
+    // borrar un script o carpeta). Conserva el estado de expansion.
+    void refreshScripts();
 
     // World que alimenta el Explorer y las Properties. No se posee. Al
     // fijarlo, el Explorer se suscribe a los eventos del World (alta,
@@ -137,6 +150,24 @@ public:
         onInsertClass_ = std::move(cb);
     }
 
+    // Operaciones del arbol de scripts en disco (nodos sinteticos): crear
+    // un script dentro de la carpeta rel, renombrar el nodo rel, borrarlo
+    // o seleccionarlo.
+    void setOnScriptCreate(std::function<void(const std::string& rel)> cb) {
+        onScriptCreate_ = std::move(cb);
+    }
+    void setOnScriptRename(
+        std::function<void(const std::string& rel, const std::string& newName)>
+            cb) {
+        onScriptRename_ = std::move(cb);
+    }
+    void setOnScriptDelete(std::function<void(const std::string& rel)> cb) {
+        onScriptDelete_ = std::move(cb);
+    }
+    void setOnScriptSelected(std::function<void(const std::string& rel)> cb) {
+        onScriptSelected_ = std::move(cb);
+    }
+
     // Renombra el nodo del Explorer (id -> newName) sin disparar
     // onSelectionChanged: el caret sigue en el mismo nodo.
     void renameTreeItem(InstanceId id, const std::string& newName);
@@ -153,6 +184,7 @@ private:
     void layoutChildren(int panelH);
     void notifySelection();
     void switchLeftTab(int tab);
+    void rebuildScriptsTree();
 
     void* parent_ = nullptr;
     void* explorer_ = nullptr;
@@ -166,6 +198,8 @@ private:
     const World* world_ = nullptr;
     std::string scriptsRoot_;  // carpeta scripts/ del proyecto
     std::string assetsRoot_;   // carpeta assets/ del proyecto (o raiz)
+    const Project* project_ = nullptr;              // proyecto abierto (o null)
+    std::unique_ptr<ui::ScriptsTree> scriptsTree_;  // arbol de scripts en disco
     bool visible_ = false;
     bool suppressNotify_ = false;  // syncTreeSelection mueve el caret a mano
 
@@ -180,6 +214,10 @@ private:
     std::function<void(InstanceId, const std::string&)> onTagRemoved_;
     std::function<void(InstanceId, const std::string&)> onInsertClass_;
     std::function<void(const std::vector<InstanceId>&)> onDelete_;
+    std::function<void(const std::string&)> onScriptCreate_;
+    std::function<void(const std::string&, const std::string&)> onScriptRename_;
+    std::function<void(const std::string&)> onScriptDelete_;
+    std::function<void(const std::string&)> onScriptSelected_;
 
     // Abre el selector de clase del boton "+" para el nodo indicado,
     // anclado a un punto de pantalla.

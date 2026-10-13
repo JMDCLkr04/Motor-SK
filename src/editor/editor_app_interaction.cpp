@@ -301,7 +301,7 @@ void EditorApp::frameInteraction(const FrameCtx& ctx) {
 // Dibujo bajo demanda: caches, marquee, gizmo y drawFrame. Devuelve false
 // solo si drawFrame falla.
 bool EditorApp::frameDraw(const FrameCtx& ctx) {
-    if (logProjection_ && place_.visible()) {
+    if (logProjection_ && viewportVisible()) {
         logProjection_ = false;
         for (InstanceId id : allInstances()) {
             const Instance* object = world_.find(id);
@@ -398,7 +398,7 @@ bool EditorApp::frameDraw(const FrameCtx& ctx) {
     const double drawStart = statsEnabled_ ? nowSeconds() : 0.0;
     if (!renderer_.drawFrame(ctx.viewProj, modelCache_, shapeCache_,
                              outlineCache_, marquee, gizmoLines,
-                             gizmoChanged)) {
+                             gizmoChanged, viewGrid_)) {
         SK_ERROR("drawFrame fallo");
         return false;
     }

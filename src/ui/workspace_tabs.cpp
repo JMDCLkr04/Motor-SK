@@ -21,9 +21,11 @@ const char* kTabsClass = "MotorSKWorkspaceTabs";
 
 const char* kTabNames[] = {"PLACE", "CODE", "GUI"};
 
-// X donde empiezan las pestanas de la navbar: deja sitio al boton "libro"
-// (kDocsButtonX + kDocsButtonSize) mas un margen.
-constexpr int kNavbarY = 30 + 54 + 6;  // kMenuBarHeight + kShortcutHeight + 6
+// Y de la navbar: justo bajo la fila de menus + atajos (sin hueco: la
+// fila mide kNavbarHeight = 24px y los botones la llenan). X donde
+// empiezan las pestanas: deja sitio al boton "libro" (kDocsButtonX +
+// kDocsButtonSize) mas un margen.
+constexpr int kNavbarY = 30 + 54;  // kMenuBarHeight + kShortcutHeight
 constexpr int kTabStartX = 10 + 24 + 8;
 
 // Items del menu "Archivo" (indices 0..8 = kFileClose..kFileExit).
@@ -105,6 +107,18 @@ constexpr int kMenuWidth = 128;
 constexpr int kMenuRowHeight = 24;
 const char* kShapeMenuClass = "MotorSKShapeMenu";
 const char* kFileMenuClass = "MotorSKFileMenu";
+
+// Menu "Vista" de la navbar: un separador vertical tras la pestana GUI y
+// un boton con su desplegable de opciones (rejilla/sombras/wireframe/
+// estadisticas). La pestana GUI ocupa kTabStartX + 2*82 .. +76.
+constexpr int kViewDividerX = kTabStartX + 2 * 82 + 76 + 8;
+constexpr int kViewButtonX = kViewDividerX + 9;
+constexpr int kViewButtonW = 60;
+constexpr int kViewButtonH = 24;
+constexpr int kViewMenuWidth = 190;
+constexpr int kViewMenuRow = 26;
+const char* kViewMenuClass = "MotorSKViewMenu";
+const char* kViewItems[] = {"Rejilla", "Sombras", "Wireframe", "Estadisticas"};
 
 // Icono GDI de cada herramienta, centrado en la mitad superior de la
 // tarjeta; lineas simples en color texto sobre el fondo (oscuro o
@@ -350,6 +364,74 @@ void paintFileItem(const DRAWITEMSTRUCT& dis) {    HDC hdc = dis.hDC;
     RECT tr = rc;
     tr.left += 12;
     DrawTextA(hdc, label, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    SelectObject(hdc, oldFont);
+}
+
+// Boton "Vista" de la navbar: base oscura; en acento mientras su
+// desplegable esta abierto (igual que el boton Archivo).
+void paintViewButton(const DRAWITEMSTRUCT& dis, bool open) {
+    if (!open) {
+        ui::paintDarkButton(dis, true);
+        return;
+    }
+    HDC hdc = dis.hDC;
+    RECT rc = dis.rcItem;
+    HBRUSH brush = CreateSolidBrush(theme::accent());
+    HPEN pen = CreatePen(PS_SOLID, 1, theme::accent());
+    HBRUSH oldBrush = static_cast<HBRUSH>(SelectObject(hdc, brush));
+    HPEN oldPen = static_cast<HPEN>(SelectObject(hdc, pen));
+    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, 10, 10);
+    SelectObject(hdc, oldBrush);
+    SelectObject(hdc, oldPen);
+    DeleteObject(pen);
+    DeleteObject(brush);
+
+    char label[64]{};
+    GetWindowTextA(dis.hwndItem, label, static_cast<int>(sizeof(label)));
+    HFONT oldFont = static_cast<HFONT>(SelectObject(hdc, theme::uiFont()));
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, theme::text());
+    DrawTextA(hdc, label, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    SelectObject(hdc, oldFont);
+}
+
+// Opcion del menu Vista: fila oscura, texto a la izquierda y una marca de
+// verificacion a la derecha cuando la opcion esta activada.
+void paintViewItem(const DRAWITEMSTRUCT& dis, bool on) {
+    HDC hdc = dis.hDC;
+    RECT rc = dis.rcItem;
+    const ui::DarkButton* db = ui::findDarkButton(dis.hwndItem);
+    HBRUSH fill = CreateSolidBrush(
+        (db && db->hover) ? theme::surfaceHover() : theme::surface());
+    FillRect(hdc, &rc, fill);
+    DeleteObject(fill);
+    HPEN pen = CreatePen(PS_SOLID, 1, theme::border());
+    HPEN oldPen = static_cast<HPEN>(SelectObject(hdc, pen));
+    MoveToEx(hdc, rc.left, rc.bottom - 1, nullptr);
+    LineTo(hdc, rc.right, rc.bottom - 1);
+    SelectObject(hdc, oldPen);
+    DeleteObject(pen);
+
+    char label[128]{};
+    GetWindowTextA(dis.hwndItem, label, static_cast<int>(sizeof(label)));
+    HFONT oldFont = static_cast<HFONT>(SelectObject(hdc, theme::uiFont()));
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, on ? theme::text() : theme::textDisabled());
+    RECT tr = rc;
+    tr.left += 12;
+    DrawTextA(hdc, label, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    if (on) {
+        const int cy = (rc.top + rc.bottom) / 2;
+        const int cx = rc.right - 20;
+        HPEN checkPen = CreatePen(PS_SOLID, 2, theme::accent());
+        HPEN oldCP = static_cast<HPEN>(SelectObject(hdc, checkPen));
+        MoveToEx(hdc, cx - 5, cy, nullptr);
+        LineTo(hdc, cx - 1, cy + 4);
+        LineTo(hdc, cx + 6, cy - 5);
+        SelectObject(hdc, oldCP);
+        DeleteObject(checkPen);
+    }
     SelectObject(hdc, oldFont);
 }
 
@@ -789,6 +871,52 @@ bool WorkspaceTabs::create(void* parentHwnd) {
     SendMessageA(static_cast<HWND>(docsBtn_), WM_SETFONT,
                  reinterpret_cast<WPARAM>(theme::uiFont()), TRUE);
 
+    // Separador vertical y boton "Vista" con su desplegable de opciones
+    // (rejilla/sombras/wireframe/estadisticas), al final de la navbar.
+    viewDivider_ = CreateWindowExA(
+        0, "STATIC", "", WS_CHILD | WS_VISIBLE | SS_OWNERDRAW, kViewDividerX,
+        kNavbarY, 1, kViewButtonH, static_cast<HWND>(hwnd_),
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdViewDivider)), inst,
+        nullptr);
+    viewButton_ = CreateWindowExA(
+        0, "BUTTON", "Vista", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+        kViewButtonX, kNavbarY, kViewButtonW, kViewButtonH,
+        static_cast<HWND>(hwnd_),
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdView)), inst, nullptr);
+    SendMessageA(static_cast<HWND>(viewButton_), WM_SETFONT,
+                 reinterpret_cast<WPARAM>(theme::uiFont()), TRUE);
+
+    static bool viewMenuRegistered = false;
+    if (!viewMenuRegistered) {
+        WNDCLASSEXA wc{};
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc =
+            reinterpret_cast<WNDPROC>(&WorkspaceTabs::viewPopupProc);
+        wc.hInstance = inst;
+        wc.hCursor = LoadCursorA(nullptr, IDC_ARROW);
+        wc.hbrBackground = theme::backgroundBrush();
+        wc.lpszClassName = kViewMenuClass;
+        RegisterClassExA(&wc);
+        viewMenuRegistered = true;
+    }
+    viewMenu_ = CreateWindowExA(0, kViewMenuClass, "", WS_POPUP | WS_BORDER, 0,
+                                0, kViewMenuWidth, kViewOptionCount * kViewMenuRow,
+                                parent, nullptr, inst, this);
+    if (viewMenu_) {
+        for (int i = 0; i < kViewOptionCount; ++i) {
+            viewButtons_[i] = CreateWindowExA(
+                0, "BUTTON", kViewItems[i],
+                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, i * kViewMenuRow,
+                kViewMenuWidth, kViewMenuRow, static_cast<HWND>(viewMenu_),
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kIdViewBase + i)),
+                inst, nullptr);
+            SendMessageA(static_cast<HWND>(viewButtons_[i]), WM_SETFONT,
+                         reinterpret_cast<WPARAM>(theme::uiFont()), TRUE);
+            ui::makeDarkButton(static_cast<HWND>(viewButtons_[i]));
+        }
+        ShowWindow(static_cast<HWND>(viewMenu_), SW_HIDE);
+    }
+
     // Los controles hijos se apilan de abajo hacia arriba: el triangulito
     // (creado antes que la navbar) queda debajo del boton Part. Lo subimos
     // al frente para que reciba el clic.
@@ -821,6 +949,10 @@ void WorkspaceTabs::destroy() {
         fileMenu_ = nullptr;
         for (int i = 0; i < kFileCount; ++i) fileButtons_[i] = nullptr;
         docsBtn_ = nullptr;
+        viewDivider_ = nullptr;
+        viewButton_ = nullptr;
+        viewMenu_ = nullptr;
+        for (int i = 0; i < kViewOptionCount; ++i) viewButtons_[i] = nullptr;
         playButton_ = nullptr;
         runButton_ = nullptr;
         stopButton_ = nullptr;
@@ -945,6 +1077,14 @@ void WorkspaceTabs::resize(int width, int height) {
         MoveWindow(static_cast<HWND>(docsBtn_), kDocsButtonX, kNavbarY,
                    kDocsButtonSize, kDocsButtonSize, TRUE);
     }
+    if (viewDivider_) {
+        MoveWindow(static_cast<HWND>(viewDivider_), kViewDividerX, kNavbarY, 1,
+                   kViewButtonH, TRUE);
+    }
+    if (viewButton_) {
+        MoveWindow(static_cast<HWND>(viewButton_), kViewButtonX, kNavbarY,
+                   kViewButtonW, kViewButtonH, TRUE);
+    }
 }
 
 long long __stdcall WorkspaceTabs::wndProc(void* hwndPtr, unsigned int msg,
@@ -1003,6 +1143,14 @@ long long __stdcall WorkspaceTabs::wndProc(void* hwndPtr, unsigned int msg,
                     paintDocsButton(*dis, self->docsActive_);
                     return TRUE;
                 }
+                if (dis->CtlID == kIdView) {
+                    paintViewButton(*dis, self->viewMenuOpen_);
+                    return TRUE;
+                }
+                if (dis->CtlID == kIdViewDivider) {
+                    paintDivider(*dis);
+                    return TRUE;
+                }
                 const int index = static_cast<int>(dis->CtlID) - 1;
                 if (index >= 0 && index < kTabCount) {
                     paintTab(*dis, index == self->active_);
@@ -1044,6 +1192,10 @@ long long __stdcall WorkspaceTabs::wndProc(void* hwndPtr, unsigned int msg,
                 }
                 if (HIWORD(wParam) == BN_CLICKED && id == kIdDocsButton) {
                     if (self->onDocs_) self->onDocs_();
+                    return 0;
+                }
+                if (HIWORD(wParam) == BN_CLICKED && id == kIdView) {
+                    self->showViewMenu(!self->viewMenuOpen_);
                     return 0;
                 }
                 if (HIWORD(wParam) == BN_CLICKED && id == kIdPlay) {
@@ -1183,6 +1335,55 @@ long long __stdcall WorkspaceTabs::filePopupProc(void* hwndPtr, unsigned int msg
     return DefWindowProcA(hwnd, msg, wParam, lParam);
 }
 
+long long __stdcall WorkspaceTabs::viewPopupProc(void* hwndPtr, unsigned int msg,
+                                                 unsigned long long wParam,
+                                                 long long lParam) {
+    HWND hwnd = static_cast<HWND>(hwndPtr);
+    WorkspaceTabs* self = reinterpret_cast<WorkspaceTabs*>(
+        GetWindowLongPtrA(hwnd, GWLP_USERDATA));
+
+    if (msg == WM_NCCREATE) {
+        auto* cs = reinterpret_cast<CREATESTRUCTA*>(lParam);
+        self = static_cast<WorkspaceTabs*>(cs->lpCreateParams);
+        SetWindowLongPtrA(hwnd, GWLP_USERDATA,
+                          reinterpret_cast<LONG_PTR>(self));
+    }
+
+    if (self) {
+        switch (msg) {
+            case WM_ACTIVATE:
+                // Al perder la activacion (clic fuera) se cierra.
+                if (LOWORD(wParam) == WA_INACTIVE && self->viewMenuOpen_) {
+                    self->showViewMenu(false);
+                }
+                return 0;
+            case WM_DRAWITEM: {
+                auto* dis = reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
+                const int id = static_cast<int>(dis->CtlID);
+                if (id >= kIdViewBase && id < kIdViewBase + kViewOptionCount) {
+                    paintViewItem(*dis, self->viewOptions_[id - kIdViewBase]);
+                    return TRUE;
+                }
+                break;
+            }
+            case WM_COMMAND: {
+                const int id = static_cast<int>(LOWORD(wParam));
+                if (HIWORD(wParam) == BN_CLICKED && id >= kIdViewBase &&
+                    id < kIdViewBase + kViewOptionCount) {
+                    // Alternar no cierra el menu: se pueden cambiar varias
+                    // opciones seguidas.
+                    self->toggleViewOption(id - kIdViewBase);
+                    return 0;
+                }
+                break;
+            }
+            default:
+                break;
+        }
+    }
+    return DefWindowProcA(hwnd, msg, wParam, lParam);
+}
+
 void WorkspaceTabs::showFileMenu(bool show) {
     if (!fileMenu_) return;
     if (!show) {
@@ -1201,6 +1402,35 @@ void WorkspaceTabs::showFileMenu(bool show) {
     fileMenuOpen_ = true;
     InvalidateRect(static_cast<HWND>(fileButton_), nullptr, TRUE);
     SK_INFO("menu Archivo abierto");
+}
+
+void WorkspaceTabs::showViewMenu(bool show) {
+    if (!viewMenu_) return;
+    if (!show) {
+        ShowWindow(static_cast<HWND>(viewMenu_), SW_HIDE);
+        viewMenuOpen_ = false;
+        InvalidateRect(static_cast<HWND>(viewButton_), nullptr, TRUE);
+        return;
+    }
+    if (!viewButton_) return;
+    RECT rc{};
+    GetWindowRect(static_cast<HWND>(viewButton_), &rc);
+    SetWindowPos(static_cast<HWND>(viewMenu_), HWND_TOPMOST, rc.left,
+                 rc.bottom + 2, kViewMenuWidth, kViewOptionCount * kViewMenuRow,
+                 SWP_SHOWWINDOW);
+    SetFocus(static_cast<HWND>(viewMenu_));
+    viewMenuOpen_ = true;
+    InvalidateRect(static_cast<HWND>(viewButton_), nullptr, TRUE);
+    SK_INFO("menu Vista abierto");
+}
+
+void WorkspaceTabs::toggleViewOption(int index) {
+    if (index < 0 || index >= kViewOptionCount) return;
+    viewOptions_[index] = !viewOptions_[index];
+    if (viewButtons_[index]) {
+        InvalidateRect(static_cast<HWND>(viewButtons_[index]), nullptr, TRUE);
+    }
+    if (onViewOption_) onViewOption_(index, viewOptions_[index]);
 }
 
 void WorkspaceTabs::setPartShape(int shape) {

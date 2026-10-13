@@ -48,12 +48,13 @@ public:
     // outlines: matriz de cada objeto seleccionado (contorno celeste,
     // ya con la escala 1.02 aplicada); marquee: rectangulo de arrastre;
     // gizmo: lineas del gizmo activo en coordenadas de mundo (se pintan
-    // sin depth, por encima de la escena).
+    // sin depth, por encima de la escena); showGrid: pinta la rejilla del
+    // suelo (opcion de vista "Rejilla").
     bool drawFrame(const Mat4& viewProj, const std::vector<Mat4>& objects,
                    const std::vector<int>& shapes,
                    const std::vector<Mat4>& outlines, const ScreenRect& marquee,
                    const std::vector<LineVertex>& gizmo,
-                   bool gizmoChanged = true);
+                   bool gizmoChanged = true, bool showGrid = true);
 
     // WM_SIZE de la ventana: llvmpipe no devuelve OUT_OF_DATE al
     // redimensionar, asi que hay que marcar la swapchain a mano.
